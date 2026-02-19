@@ -8,6 +8,10 @@ publish = false
 name = "silentpaymentscanner"
 path = "src/silentpaymentscanner.rs"
 
+[[bin]]
+name = "script_debugger"
+path = "src/script_debugger.rs"
+
 [dependencies]
 silentpayments = "0.1"
 bitcoin = "0.31"
