@@ -6,10 +6,11 @@ mod tests {
         prelude::*, verify, Block, BlockHash, BlockHeader, BlockSpentOutputs, BlockTreeEntry,
         BlockValidationStateRef, ChainParams, ChainType, ChainstateManager,
         ChainstateManagerBuilder, Coin, Context, ContextBuilder, KernelError, Log, Logger,
-        PrecomputedTransactionData, ScriptPubkey, ScriptVerifyError, Transaction,
-        TransactionSpentOutputs, TxIn, TxOut, ValidationMode, VERIFY_ALL, VERIFY_ALL_PRE_TAPROOT,
-        VERIFY_TAPROOT, VERIFY_WITNESS,
+        PrecomputedTransactionData, ScriptDebugger, ScriptPhase, ScriptPubkey, ScriptVerifyError,
+        Transaction, TransactionSpentOutputs, TxIn, TxOut, ValidationMode, VERIFY_ALL,
+        VERIFY_ALL_PRE_TAPROOT, VERIFY_TAPROOT, VERIFY_WITNESS,
     };
+    use bitcoinkernel::trace_verify;
     use libbitcoinkernel_sys::btck_ScriptVerificationFlags;
     use std::fs::File;
     use std::io::{BufRead, BufReader};
@@ -632,5 +633,147 @@ mod tests {
 
         // is_sync::<Rc<u8>>(); // won't compile, kept as a failure case.
         // is_send::<Rc<u8>>(); // won't compile, kept as a failure case.
+    }
+
+    // ─── Script debugger integration tests ──────────────────────────────
+
+    // The ScriptDebugger uses a global callback, so only one can be active at a time.
+    // We serialize all debugger tests with this mutex to prevent parallel conflicts.
+    use std::sync::Mutex;
+    static DEBUGGER_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn test_trace_verify_p2pkh() {
+        let _ = testing_setup();
+        let _lock = DEBUGGER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let spent = "76a9144bfbaf6afb76cc5771bc6404810d1cc041a6933988ac";
+        let spending = "02000000013f7cebd65c27431a90bba7f796914fe8cc2ddfc3f2cbd6f7e5f2fc854534da95000000006b483045022100de1ac3bcdfb0332207c4a91f3832bd2c2915840165f876ab47c5f8996b971c3602201c6c053d750fadde599e6f5c4e1963df0f01fc0d97815e8157e3d59fe09ca30d012103699b464d1d8bc9e47d4fb1cdaa89a1c5783d68363c4dbc4b524ed3d857148617feffffff02836d3c01000000001976a914fc25d6d5c94003bf5b0c7b640a248e2c637fcfb088ac7ada8202000000001976a914fbed3d9b11183209a57999d54d59f67c019e756c88ac6acb0700";
+
+        let script_pubkey =
+            ScriptPubkey::try_from(hex::decode(spent).unwrap().as_slice()).unwrap();
+        let tx = Transaction::new(hex::decode(spending).unwrap().as_slice()).unwrap();
+        let tx_data = PrecomputedTransactionData::new(&tx, &Vec::<TxOut>::new()).unwrap();
+
+        let trace = trace_verify(
+            &script_pubkey,
+            Some(0),
+            &tx,
+            0,
+            Some(VERIFY_ALL_PRE_TAPROOT),
+            &tx_data,
+        );
+
+        assert!(trace.success);
+        assert!(!trace.is_empty());
+
+        // P2PKH should have ScriptSig + ScriptPubKey phases
+        let phases = trace.phases();
+        assert!(phases.len() >= 2, "Expected at least 2 phases, got {}", phases.len());
+        assert_eq!(phases[0], ScriptPhase::ScriptSig);
+        assert_eq!(phases[1], ScriptPhase::ScriptPubKey);
+
+        // Final stack should have a truthy value
+        let final_stack = trace.final_stack().unwrap();
+        assert!(!final_stack.is_empty());
+    }
+
+    #[test]
+    fn test_trace_verify_p2sh_segwit() {
+        let _ = testing_setup();
+        let _lock = DEBUGGER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let spent = "a91434c06f8c87e355e123bdc6dda4ffabc64b6989ef87";
+        let spending = "01000000000101d9fd94d0ff0026d307c994d0003180a5f248146efb6371d040c5973f5f66d9df0400000017160014b31b31a6cb654cfab3c50567bcf124f48a0beaecffffffff012cbd1c000000000017a914233b74bf0823fa58bbbd26dfc3bb4ae715547167870247304402206f60569cac136c114a58aedd80f6fa1c51b49093e7af883e605c212bdafcd8d202200e91a55f408a021ad2631bc29a67bd6915b2d7e9ef0265627eabd7f7234455f6012103e7e802f50344303c76d12c089c8724c1b230e3b745693bbe16aad536293d15e300000000";
+
+        let script_pubkey =
+            ScriptPubkey::try_from(hex::decode(spent).unwrap().as_slice()).unwrap();
+        let tx = Transaction::new(hex::decode(spending).unwrap().as_slice()).unwrap();
+        let tx_data = PrecomputedTransactionData::new(&tx, &Vec::<TxOut>::new()).unwrap();
+
+        let trace = trace_verify(
+            &script_pubkey,
+            Some(1900000),
+            &tx,
+            0,
+            Some(VERIFY_ALL_PRE_TAPROOT),
+            &tx_data,
+        );
+
+        assert!(trace.success);
+        // P2SH-P2WPKH: should have at least 3 phases (ScriptSig, ScriptPubKey, RedeemScript/WitnessScript)
+        let phases = trace.phases();
+        assert!(
+            phases.len() >= 3,
+            "Expected at least 3 phases for P2SH-P2WPKH, got {}",
+            phases.len()
+        );
+    }
+
+    #[test]
+    fn test_trace_verify_failure() {
+        let _ = testing_setup();
+        let _lock = DEBUGGER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Wrong scriptPubKey (last byte changed from 0xac to 0xff)
+        let spent = "76a9144bfbaf6afb76cc5771bc6404810d1cc041a6933988ff";
+        let spending = "02000000013f7cebd65c27431a90bba7f796914fe8cc2ddfc3f2cbd6f7e5f2fc854534da95000000006b483045022100de1ac3bcdfb0332207c4a91f3832bd2c2915840165f876ab47c5f8996b971c3602201c6c053d750fadde599e6f5c4e1963df0f01fc0d97815e8157e3d59fe09ca30d012103699b464d1d8bc9e47d4fb1cdaa89a1c5783d68363c4dbc4b524ed3d857148617feffffff02836d3c01000000001976a914fc25d6d5c94003bf5b0c7b640a248e2c637fcfb088ac7ada8202000000001976a914fbed3d9b11183209a57999d54d59f67c019e756c88ac6acb0700";
+
+        let script_pubkey =
+            ScriptPubkey::try_from(hex::decode(spent).unwrap().as_slice()).unwrap();
+        let tx = Transaction::new(hex::decode(spending).unwrap().as_slice()).unwrap();
+        let tx_data = PrecomputedTransactionData::new(&tx, &Vec::<TxOut>::new()).unwrap();
+
+        let trace = trace_verify(
+            &script_pubkey,
+            Some(0),
+            &tx,
+            0,
+            Some(VERIFY_ALL_PRE_TAPROOT),
+            &tx_data,
+        );
+
+        assert!(!trace.success);
+        assert!(trace.error.is_some());
+        // Should still have captured some steps
+        assert!(!trace.is_empty());
+    }
+
+    #[test]
+    fn test_debugger_drop_unregisters() {
+        let _ = testing_setup();
+        let _lock = DEBUGGER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Create and drop a debugger
+        {
+            let debugger = ScriptDebugger::new();
+            drop(debugger);
+        }
+
+        // Should be able to create another one
+        {
+            let debugger = ScriptDebugger::new();
+            drop(debugger);
+        }
+    }
+
+    #[test]
+    fn test_double_debugger_panics() {
+        let _ = testing_setup();
+        // Use unwrap_or_else to handle a potentially poisoned mutex from a prior panic
+        let _lock = DEBUGGER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let result = std::panic::catch_unwind(|| {
+            let _debugger1 = ScriptDebugger::new();
+            let _debugger2 = ScriptDebugger::new();
+        });
+
+        assert!(result.is_err(), "Expected panic from double debugger registration");
+        let err = result.unwrap_err();
+        let msg = err.downcast_ref::<String>()
+            .map(|s| s.as_str())
+            .or_else(|| err.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        assert!(msg.contains("ScriptDebugger is already active"), "Unexpected panic message: {}", msg);
     }
 }
