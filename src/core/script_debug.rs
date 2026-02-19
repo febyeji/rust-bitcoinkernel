@@ -1,12 +1,30 @@
-//! Bitcoin script execution data types.
+//! Bitcoin script debugger: types and execution tracing.
 //!
-//! This module provides types for representing and inspecting Bitcoin script
-//! execution state: opcodes, script instructions, stack items, and script phases.
+//! This module provides:
 //!
-//! These types are pure data — they have no FFI dependencies and can be used
-//! independently of the debugger callback infrastructure.
+//! - Pure data types for script execution state: [`Opcode`], [`ScriptInstruction`],
+//!   [`StackItem`], [`ScriptPhase`], [`ScriptStep`], [`ScriptTrace`].
+//! - [`ScriptDebugger`]: registers a global C callback into libbitcoinkernel's
+//!   `EvalScript` loop and collects execution steps.
+//! - [`trace_verify`]: convenience wrapper that runs [`verify`] under a debugger
+//!   and returns the full execution trace.
+//!
+//! # Thread safety
+//!
+//! libbitcoinkernel's script debug callback is a process-global singleton.
+//! Only one [`ScriptDebugger`] may be active at a time; attempting to create
+//! a second one while the first is alive will panic.  The debugger is
+//! automatically unregistered when it is dropped.
 
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use libbitcoinkernel_sys::{
+    btck_register_script_debug_callback, btck_unregister_script_debug_callback,
+};
+
+use crate::core::verify::PrecomputedTransactionData;
+use crate::{verify, KernelError, ScriptPubkeyExt, TransactionExt};
 
 // ─── Opcode ─────────────────────────────────────────────────────────────────
 
@@ -660,6 +678,329 @@ impl fmt::Display for ScriptPhase {
     }
 }
 
+// ─── ScriptStep ─────────────────────────────────────────────────────────────
+
+/// A single step of Bitcoin script execution.
+///
+/// Represents the state of the interpreter *before* the opcode at `opcode_pos`
+/// executes (or the final state after the last opcode when `instruction` is
+/// `None`).
+#[derive(Debug, Clone)]
+pub struct ScriptStep {
+    /// Global step index across all phases (0-based).
+    pub step_index: usize,
+    /// The decoded instruction about to execute, or `None` for the final state.
+    pub instruction: Option<ScriptInstruction>,
+    /// The main stack at this point.
+    pub stack: Vec<StackItem>,
+    /// The alt stack at this point.
+    pub altstack: Vec<StackItem>,
+    /// Raw script bytes for this phase.
+    pub script_bytes: Vec<u8>,
+    /// The inferred execution phase.
+    pub phase: ScriptPhase,
+    /// The C-side opcode iteration counter.
+    pub opcode_pos: u32,
+}
+
+// ─── ScriptTrace ─────────────────────────────────────────────────────────────
+
+/// Complete execution trace for a Bitcoin script verification.
+///
+/// Returned by [`trace_verify`].
+#[derive(Debug, Clone)]
+pub struct ScriptTrace {
+    /// All execution steps in order.
+    pub steps: Vec<ScriptStep>,
+    /// Whether verification succeeded.
+    pub success: bool,
+    /// Error description if verification failed.
+    pub error: Option<String>,
+}
+
+impl ScriptTrace {
+    /// Number of steps in the trace.
+    pub fn len(&self) -> usize {
+        self.steps.len()
+    }
+
+    /// Returns true if the trace has no steps.
+    pub fn is_empty(&self) -> bool {
+        self.steps.is_empty()
+    }
+
+    /// Get a step by index.
+    pub fn step(&self, idx: usize) -> Option<&ScriptStep> {
+        self.steps.get(idx)
+    }
+
+    /// Iterate over all steps.
+    pub fn iter(&self) -> std::slice::Iter<'_, ScriptStep> {
+        self.steps.iter()
+    }
+
+    /// Collect the distinct phases present in the trace, in order.
+    pub fn phases(&self) -> Vec<ScriptPhase> {
+        let mut seen = Vec::new();
+        for step in &self.steps {
+            if seen.last() != Some(&step.phase) {
+                seen.push(step.phase);
+            }
+        }
+        seen
+    }
+
+    /// Return the final stack (from the last step), if any.
+    pub fn final_stack(&self) -> Option<&Vec<StackItem>> {
+        self.steps.last().map(|s| &s.stack)
+    }
+}
+
+// ─── FFI Internals ──────────────────────────────────────────────────────────
+
+/// Guard to ensure only one ScriptDebugger is active at a time.
+static DEBUGGER_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Raw step data as received from the C callback; converted to [`ScriptStep`]
+/// in [`build_trace`] after all steps are collected.
+struct RawStepData {
+    stack: Vec<Vec<u8>>,
+    altstack: Vec<Vec<u8>>,
+    script_bytes: Vec<u8>,
+    opcode_pos: u32,
+}
+
+/// Heap-allocated holder passed as `user_data` to the C callback.
+struct CallbackHolder {
+    raw_steps: Vec<RawStepData>,
+}
+
+/// Copy a flat C array of byte slices into an owned `Vec<Vec<u8>>`.
+///
+/// # Safety
+///
+/// `items` and `sizes` must each point to `count` valid, aligned values.
+/// Each `items[i]` must be valid for `sizes[i]` bytes.
+unsafe fn collect_stack(
+    items: *const *const std::os::raw::c_uchar,
+    sizes: *const usize,
+    count: usize,
+) -> Vec<Vec<u8>> {
+    (0..count)
+        .map(|i| {
+            let ptr = *items.add(i);
+            let len = *sizes.add(i);
+            if len == 0 {
+                vec![]
+            } else {
+                std::slice::from_raw_parts(ptr, len).to_vec()
+            }
+        })
+        .collect()
+}
+
+/// C-callable trampoline that forwards to `CallbackHolder`.
+///
+/// # Safety
+///
+/// `user_data` must point to a valid `CallbackHolder` for the duration
+/// the callback is registered. `state` must point to a valid
+/// `btck_ScriptDebugState`.
+unsafe extern "C" fn script_debug_callback_trampoline(
+    user_data: *mut std::os::raw::c_void,
+    state: *const libbitcoinkernel_sys::btck_ScriptDebugState,
+) {
+    let holder = &mut *(user_data as *mut CallbackHolder);
+    let s = &*state;
+
+    let stack = collect_stack(s.stack_items, s.stack_item_sizes, s.stack_size);
+    let altstack = collect_stack(s.altstack_items, s.altstack_item_sizes, s.altstack_size);
+    let script_bytes = std::slice::from_raw_parts(s.script, s.script_size).to_vec();
+
+    holder.raw_steps.push(RawStepData {
+        stack,
+        altstack,
+        script_bytes,
+        opcode_pos: s.opcode_pos,
+    });
+}
+
+/// Convert raw callback data into a [`ScriptTrace`] with phase detection.
+///
+/// Phase is inferred by watching `script_bytes` change between steps:
+/// first script = ScriptSig, second = ScriptPubKey, third = RedeemScript,
+/// fourth = WitnessScript.
+fn build_trace(raw: Vec<RawStepData>, result: Result<(), KernelError>) -> ScriptTrace {
+    let mut steps = Vec::with_capacity(raw.len());
+    let mut phase_order: Vec<Vec<u8>> = Vec::new();
+
+    for (global_idx, raw_step) in raw.into_iter().enumerate() {
+        // Detect phase by unique script_bytes sequence
+        let phase_idx = if let Some(existing) = phase_order
+            .iter()
+            .position(|s| *s == raw_step.script_bytes)
+        {
+            existing
+        } else {
+            phase_order.push(raw_step.script_bytes.clone());
+            phase_order.len() - 1
+        };
+
+        let phase = match phase_idx {
+            0 => ScriptPhase::ScriptSig,
+            1 => ScriptPhase::ScriptPubKey,
+            2 => ScriptPhase::RedeemScript,
+            3 => ScriptPhase::WitnessScript,
+            _ => ScriptPhase::Unknown,
+        };
+
+        let instructions = decode_script(&raw_step.script_bytes);
+        let instruction = instructions.get(raw_step.opcode_pos as usize).cloned();
+
+        let stack = raw_step
+            .stack
+            .into_iter()
+            .map(StackItem)
+            .collect();
+        let altstack = raw_step
+            .altstack
+            .into_iter()
+            .map(StackItem)
+            .collect();
+
+        steps.push(ScriptStep {
+            step_index: global_idx,
+            instruction,
+            stack,
+            altstack,
+            script_bytes: raw_step.script_bytes,
+            phase,
+            opcode_pos: raw_step.opcode_pos,
+        });
+    }
+
+    let (success, error) = match result {
+        Ok(()) => (true, None),
+        Err(e) => (false, Some(e.to_string())),
+    };
+
+    ScriptTrace {
+        steps,
+        success,
+        error,
+    }
+}
+
+// ─── ScriptDebugger ──────────────────────────────────────────────────────────
+
+/// Registers a script debug callback into libbitcoinkernel's `EvalScript` loop.
+///
+/// While a `ScriptDebugger` is alive, every opcode iteration during any
+/// `verify` call will invoke the callback and accumulate steps.
+/// The callback is unregistered when the debugger is dropped.
+///
+/// Only one `ScriptDebugger` may exist at a time; creating a second will panic.
+pub struct ScriptDebugger {
+    holder: *mut CallbackHolder,
+}
+
+impl ScriptDebugger {
+    /// Create a new debugger and register the global C callback.
+    ///
+    /// # Panics
+    ///
+    /// Panics if another `ScriptDebugger` is already active.
+    pub fn new() -> Self {
+        if DEBUGGER_ACTIVE
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            panic!(
+                "A ScriptDebugger is already active. \
+                 Only one debugger can be registered at a time."
+            );
+        }
+
+        let holder = Box::into_raw(Box::new(CallbackHolder {
+            raw_steps: Vec::new(),
+        }));
+
+        unsafe {
+            btck_register_script_debug_callback(
+                holder as *mut _,
+                Some(script_debug_callback_trampoline),
+            );
+        }
+
+        ScriptDebugger { holder }
+    }
+
+    /// Consume the debugger and return the accumulated raw steps.
+    ///
+    /// The callback is unregistered before the steps are returned.
+    fn into_raw_steps(mut self) -> Vec<RawStepData> {
+        unsafe {
+            btck_unregister_script_debug_callback();
+            let holder = Box::from_raw(self.holder);
+            self.holder = std::ptr::null_mut();
+            DEBUGGER_ACTIVE.store(false, Ordering::SeqCst);
+            // Prevent Drop from running again
+            std::mem::forget(self);
+            holder.raw_steps
+        }
+    }
+}
+
+impl Drop for ScriptDebugger {
+    fn drop(&mut self) {
+        if !self.holder.is_null() {
+            unsafe {
+                btck_unregister_script_debug_callback();
+                let _ = Box::from_raw(self.holder);
+                self.holder = std::ptr::null_mut();
+            }
+            DEBUGGER_ACTIVE.store(false, Ordering::SeqCst);
+        }
+    }
+}
+
+// SAFETY: The holder pointer is only accessed from the thread that owns
+// the ScriptDebugger (before verify()) and from the C callback (which is
+// called synchronously during verify() on the same thread).
+unsafe impl Send for ScriptDebugger {}
+
+// ─── trace_verify ────────────────────────────────────────────────────────────
+
+/// Run script verification and collect a full execution trace.
+///
+/// This is a convenience wrapper around [`verify`] that installs a
+/// [`ScriptDebugger`], runs verification, and returns a [`ScriptTrace`]
+/// with step-by-step execution data and the verification result.
+///
+/// # Panics
+///
+/// Panics if another [`ScriptDebugger`] is already active.
+pub fn trace_verify(
+    script_pubkey: &impl ScriptPubkeyExt,
+    amount: Option<i64>,
+    tx_to: &impl TransactionExt,
+    input_index: usize,
+    flags: Option<u32>,
+    precomputed_txdata: &PrecomputedTransactionData,
+) -> ScriptTrace {
+    let debugger = ScriptDebugger::new();
+    let result = verify(
+        script_pubkey,
+        amount,
+        tx_to,
+        input_index,
+        flags,
+        precomputed_txdata,
+    );
+    let raw = debugger.into_raw_steps();
+    build_trace(raw, result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -757,6 +1098,33 @@ mod tests {
         assert_eq!(StackItem(vec![]).format(StackItemFormat::Auto), "0x");
         assert_eq!(StackItem(b"hello".to_vec()).format(StackItemFormat::Ascii), "hello");
         assert_eq!(StackItem(vec![0x00, 0x01]).format(StackItemFormat::Ascii), "0x0001");
+    }
+
+    #[test]
+    fn test_phase_inference() {
+        // build_trace with two distinct script_bytes sequences → ScriptSig then ScriptPubKey
+        let script_sig = vec![0x00u8]; // OP_0
+        let script_pubkey = vec![0x51u8]; // OP_1
+
+        let raw = vec![
+            RawStepData {
+                stack: vec![],
+                altstack: vec![],
+                script_bytes: script_sig.clone(),
+                opcode_pos: 0,
+            },
+            RawStepData {
+                stack: vec![vec![]],
+                altstack: vec![],
+                script_bytes: script_pubkey.clone(),
+                opcode_pos: 0,
+            },
+        ];
+
+        let trace = build_trace(raw, Ok(()));
+        assert_eq!(trace.steps[0].phase, ScriptPhase::ScriptSig);
+        assert_eq!(trace.steps[1].phase, ScriptPhase::ScriptPubKey);
+        assert!(trace.success);
     }
 
     fn hex_decode(s: &str) -> Vec<u8> {
