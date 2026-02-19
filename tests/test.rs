@@ -6,7 +6,7 @@ mod tests {
         prelude::*, verify, Block, BlockHash, BlockHeader, BlockSpentOutputs, BlockTreeEntry,
         BlockValidationStateRef, ChainParams, ChainType, ChainstateManager,
         ChainstateManagerBuilder, Coin, Context, ContextBuilder, KernelError, Log, Logger,
-        PrecomputedTransactionData, ScriptDebugger, ScriptPhase, ScriptPubkey, ScriptVerifyError,
+        PrecomputedTransactionData, ScriptDebugger, ScriptExecError, ScriptPhase, ScriptPubkey, ScriptVerifyError,
         Transaction, TransactionSpentOutputs, TxIn, TxOut, ValidationMode, VERIFY_ALL,
         VERIFY_ALL_PRE_TAPROOT, VERIFY_TAPROOT, VERIFY_WITNESS,
     };
@@ -642,6 +642,42 @@ mod tests {
     use std::sync::Mutex;
     static DEBUGGER_LOCK: Mutex<()> = Mutex::new(());
 
+    // Shared spending transaction used across multiple script-error tests.
+    // This is a real P2PKH transaction from the blockchain; the scriptSig contains
+    // a valid DER signature + compressed pubkey push, so EvalScript for the scriptSig
+    // always succeeds regardless of what scriptPubKey we attach.
+    const P2PKH_SPENDING_TX: &str =
+        "02000000013f7cebd65c27431a90bba7f796914fe8cc2ddfc3f2cbd6f7e5f2fc854534da95000000006b\
+         483045022100de1ac3bcdfb0332207c4a91f3832bd2c2915840165f876ab47c5f8996b971c3602201c6c\
+         053d750fadde599e6f5c4e1963df0f01fc0d97815e8157e3d59fe09ca30d012103699b464d1d8bc9e47d\
+         4fb1cdaa89a1c5783d68363c4dbc4b524ed3d857148617feffffff02836d3c01000000001976a914fc25\
+         d6d5c94003bf5b0c7b640a248e2c637fcfb088ac7ada8202000000001976a914fbed3d9b11183209a579\
+         99d54d59f67c019e756c88ac6acb0700";
+
+    /// Run `trace_verify` with a custom scriptPubKey hex against `P2PKH_SPENDING_TX`,
+    /// assert the trace reports failure, and return the structured error code.
+    fn trace_error_test(
+        script_pubkey_hex: &str,
+        flags: btck_ScriptVerificationFlags,
+    ) -> Option<ScriptExecError> {
+        let script_pubkey =
+            ScriptPubkey::try_from(hex::decode(script_pubkey_hex).unwrap().as_slice()).unwrap();
+        let tx =
+            Transaction::new(hex::decode(P2PKH_SPENDING_TX).unwrap().as_slice()).unwrap();
+        let tx_data =
+            PrecomputedTransactionData::new(&tx, &Vec::<TxOut>::new()).unwrap();
+        let trace = trace_verify(
+            &script_pubkey,
+            Some(0),
+            &tx,
+            0,
+            Some(flags),
+            &tx_data,
+        );
+        assert!(!trace.success, "expected verification failure");
+        trace.script_error
+    }
+
     #[test]
     fn test_trace_verify_p2pkh() {
         let _ = testing_setup();
@@ -735,8 +771,50 @@ mod tests {
 
         assert!(!trace.success);
         assert!(trace.error.is_some());
+        // Last byte 0xff → OP_INVALIDOPCODE → BadOpcode
+        assert_eq!(trace.script_error, Some(ScriptExecError::BadOpcode));
         // Should still have captured some steps
         assert!(!trace.is_empty());
+    }
+
+    #[test]
+    fn test_script_error_bad_opcode() {
+        let _ = testing_setup();
+        let _lock = DEBUGGER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // scriptPubKey: 0xff = OP_INVALIDOPCODE
+        let se = trace_error_test("ff", VERIFY_ALL_PRE_TAPROOT);
+        assert_eq!(se, Some(ScriptExecError::BadOpcode));
+    }
+
+    #[test]
+    fn test_script_error_op_return() {
+        let _ = testing_setup();
+        let _lock = DEBUGGER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // scriptPubKey: 0x6a = OP_RETURN
+        let se = trace_error_test("6a", VERIFY_ALL_PRE_TAPROOT);
+        assert_eq!(se, Some(ScriptExecError::OpReturn));
+    }
+
+    #[test]
+    fn test_script_error_eval_false() {
+        let _ = testing_setup();
+        let _lock = DEBUGGER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // scriptPubKey: 0x00 = OP_0 (pushes empty bytes → falsy top-of-stack)
+        let se = trace_error_test("00", VERIFY_ALL_PRE_TAPROOT);
+        assert_eq!(se, Some(ScriptExecError::EvalFalse));
+    }
+
+    #[test]
+    fn test_script_error_equal_verify() {
+        let _ = testing_setup();
+        let _lock = DEBUGGER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // scriptPubKey: OP_1 OP_2 OP_EQUALVERIFY (1 ≠ 2 → EqualVerify)
+        let se = trace_error_test("515288", VERIFY_ALL_PRE_TAPROOT);
+        assert_eq!(se, Some(ScriptExecError::EqualVerify));
     }
 
     #[test]
