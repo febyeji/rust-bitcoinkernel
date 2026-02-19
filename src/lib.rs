@@ -316,8 +316,8 @@ pub use crate::state::{
 
 pub use crate::core::script_debug;
 pub use crate::core::script_debug::{
-    decode_script, trace_verify, Opcode, ScriptDebugger, ScriptInstruction, ScriptPhase,
-    ScriptStep, ScriptTrace, StackItem, StackItemFormat,
+    decode_script, trace_verify, Opcode, ScriptDebugger, ScriptExecError, ScriptInstruction,
+    ScriptPhase, ScriptStep, ScriptTrace, StackItem, StackItemFormat,
 };
 
 pub use crate::core::verify_flags::{

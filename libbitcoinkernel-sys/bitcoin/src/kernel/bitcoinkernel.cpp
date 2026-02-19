@@ -24,6 +24,11 @@
 #include <script/debug.h>
 #include <script/interpreter.h>
 #include <script/script.h>
+#include <script/script_error.h>
+
+/// Thread-local storage for the ScriptError from the most recent
+/// btck_script_pubkey_verify() call on this thread.
+thread_local ScriptError tls_last_script_error = SCRIPT_ERR_OK;
 #include <serialize.h>
 #include <streams.h>
 #include <sync.h>
@@ -675,12 +680,14 @@ int btck_script_pubkey_verify(const btck_ScriptPubkey* script_pubkey,
 
     if (status) *status = btck_ScriptVerifyStatus_OK;
 
+    ScriptError serror = SCRIPT_ERR_OK;
     bool result = VerifyScript(tx.vin[input_index].scriptSig,
                                btck_ScriptPubkey::get(script_pubkey),
                                &tx.vin[input_index].scriptWitness,
                                script_verify_flags::from_int(flags),
                                TransactionSignatureChecker(&tx, input_index, amount, txdata, MissingDataBehavior::FAIL),
-                               nullptr);
+                               &serror);
+    tls_last_script_error = serror;
     return result ? 1 : 0;
 }
 
@@ -1393,6 +1400,11 @@ uint32_t btck_block_header_get_nonce(const btck_BlockHeader* header)
 void btck_block_header_destroy(btck_BlockHeader* header)
 {
     delete header;
+}
+
+btck_ScriptError btck_get_last_script_error(void)
+{
+    return static_cast<btck_ScriptError>(tls_last_script_error);
 }
 
 void btck_register_script_debug_callback(void* user_data, btck_ScriptDebugCallback callback)

@@ -1829,6 +1829,90 @@ BITCOINKERNEL_API void btck_unregister_script_debug_callback(void);
 
 ///@}
 
+/** @name ScriptError
+ * Script execution error codes, mirroring Bitcoin Core's internal ScriptError enum.
+ */
+///@{
+
+typedef uint32_t btck_ScriptError;
+#define BTCK_SCRIPT_ERR_OK                                    ((btck_ScriptError)(0))
+#define BTCK_SCRIPT_ERR_UNKNOWN_ERROR                         ((btck_ScriptError)(1))
+#define BTCK_SCRIPT_ERR_EVAL_FALSE                            ((btck_ScriptError)(2))
+#define BTCK_SCRIPT_ERR_OP_RETURN                             ((btck_ScriptError)(3))
+/* Max sizes */
+#define BTCK_SCRIPT_ERR_SCRIPT_SIZE                           ((btck_ScriptError)(4))
+#define BTCK_SCRIPT_ERR_PUSH_SIZE                             ((btck_ScriptError)(5))
+#define BTCK_SCRIPT_ERR_OP_COUNT                              ((btck_ScriptError)(6))
+#define BTCK_SCRIPT_ERR_STACK_SIZE                            ((btck_ScriptError)(7))
+#define BTCK_SCRIPT_ERR_SIG_COUNT                             ((btck_ScriptError)(8))
+#define BTCK_SCRIPT_ERR_PUBKEY_COUNT                          ((btck_ScriptError)(9))
+/* Failed verify operations */
+#define BTCK_SCRIPT_ERR_VERIFY                                ((btck_ScriptError)(10))
+#define BTCK_SCRIPT_ERR_EQUALVERIFY                           ((btck_ScriptError)(11))
+#define BTCK_SCRIPT_ERR_CHECKMULTISIGVERIFY                   ((btck_ScriptError)(12))
+#define BTCK_SCRIPT_ERR_CHECKSIGVERIFY                        ((btck_ScriptError)(13))
+#define BTCK_SCRIPT_ERR_NUMEQUALVERIFY                        ((btck_ScriptError)(14))
+/* Logical/Format/Canonical errors */
+#define BTCK_SCRIPT_ERR_BAD_OPCODE                            ((btck_ScriptError)(15))
+#define BTCK_SCRIPT_ERR_DISABLED_OPCODE                       ((btck_ScriptError)(16))
+#define BTCK_SCRIPT_ERR_INVALID_STACK_OPERATION               ((btck_ScriptError)(17))
+#define BTCK_SCRIPT_ERR_INVALID_ALTSTACK_OPERATION            ((btck_ScriptError)(18))
+#define BTCK_SCRIPT_ERR_UNBALANCED_CONDITIONAL                ((btck_ScriptError)(19))
+/* CHECKLOCKTIMEVERIFY and CHECKSEQUENCEVERIFY */
+#define BTCK_SCRIPT_ERR_NEGATIVE_LOCKTIME                     ((btck_ScriptError)(20))
+#define BTCK_SCRIPT_ERR_UNSATISFIED_LOCKTIME                  ((btck_ScriptError)(21))
+/* Malleability */
+#define BTCK_SCRIPT_ERR_SIG_HASHTYPE                          ((btck_ScriptError)(22))
+#define BTCK_SCRIPT_ERR_SIG_DER                               ((btck_ScriptError)(23))
+#define BTCK_SCRIPT_ERR_MINIMALDATA                           ((btck_ScriptError)(24))
+#define BTCK_SCRIPT_ERR_SIG_PUSHONLY                          ((btck_ScriptError)(25))
+#define BTCK_SCRIPT_ERR_SIG_HIGH_S                            ((btck_ScriptError)(26))
+#define BTCK_SCRIPT_ERR_SIG_NULLDUMMY                         ((btck_ScriptError)(27))
+#define BTCK_SCRIPT_ERR_PUBKEYTYPE                            ((btck_ScriptError)(28))
+#define BTCK_SCRIPT_ERR_CLEANSTACK                            ((btck_ScriptError)(29))
+#define BTCK_SCRIPT_ERR_MINIMALIF                             ((btck_ScriptError)(30))
+#define BTCK_SCRIPT_ERR_SIG_NULLFAIL                          ((btck_ScriptError)(31))
+/* Softfork safeness */
+#define BTCK_SCRIPT_ERR_DISCOURAGE_UPGRADABLE_NOPS            ((btck_ScriptError)(32))
+#define BTCK_SCRIPT_ERR_DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM ((btck_ScriptError)(33))
+#define BTCK_SCRIPT_ERR_DISCOURAGE_UPGRADABLE_TAPROOT_VERSION ((btck_ScriptError)(34))
+#define BTCK_SCRIPT_ERR_DISCOURAGE_OP_SUCCESS                 ((btck_ScriptError)(35))
+#define BTCK_SCRIPT_ERR_DISCOURAGE_UPGRADABLE_PUBKEYTYPE      ((btck_ScriptError)(36))
+/* Segregated witness */
+#define BTCK_SCRIPT_ERR_WITNESS_PROGRAM_WRONG_LENGTH          ((btck_ScriptError)(37))
+#define BTCK_SCRIPT_ERR_WITNESS_PROGRAM_WITNESS_EMPTY         ((btck_ScriptError)(38))
+#define BTCK_SCRIPT_ERR_WITNESS_PROGRAM_MISMATCH              ((btck_ScriptError)(39))
+#define BTCK_SCRIPT_ERR_WITNESS_MALLEATED                     ((btck_ScriptError)(40))
+#define BTCK_SCRIPT_ERR_WITNESS_MALLEATED_P2SH                ((btck_ScriptError)(41))
+#define BTCK_SCRIPT_ERR_WITNESS_UNEXPECTED                    ((btck_ScriptError)(42))
+#define BTCK_SCRIPT_ERR_WITNESS_PUBKEYTYPE                    ((btck_ScriptError)(43))
+/* Taproot */
+#define BTCK_SCRIPT_ERR_SCHNORR_SIG_SIZE                      ((btck_ScriptError)(44))
+#define BTCK_SCRIPT_ERR_SCHNORR_SIG_HASHTYPE                  ((btck_ScriptError)(45))
+#define BTCK_SCRIPT_ERR_SCHNORR_SIG                           ((btck_ScriptError)(46))
+#define BTCK_SCRIPT_ERR_TAPROOT_WRONG_CONTROL_SIZE            ((btck_ScriptError)(47))
+#define BTCK_SCRIPT_ERR_TAPSCRIPT_VALIDATION_WEIGHT           ((btck_ScriptError)(48))
+#define BTCK_SCRIPT_ERR_TAPSCRIPT_CHECKMULTISIG               ((btck_ScriptError)(49))
+#define BTCK_SCRIPT_ERR_TAPSCRIPT_MINIMALIF                   ((btck_ScriptError)(50))
+#define BTCK_SCRIPT_ERR_TAPSCRIPT_EMPTY_PUBKEY                ((btck_ScriptError)(51))
+/* Constant scriptCode */
+#define BTCK_SCRIPT_ERR_OP_CODESEPARATOR                      ((btck_ScriptError)(52))
+#define BTCK_SCRIPT_ERR_SIG_FINDANDDELETE                     ((btck_ScriptError)(53))
+
+/**
+ * @brief Return the script execution error from the most recent
+ *        btck_script_pubkey_verify() call on this thread.
+ *
+ * Returns BTCK_SCRIPT_ERR_OK (0) if the last verification succeeded or if
+ * btck_script_pubkey_verify() has not been called on this thread yet.
+ *
+ * The value is stored in thread-local storage and is overwritten on every
+ * btck_script_pubkey_verify() call, so it must be read before the next call.
+ */
+BITCOINKERNEL_API btck_ScriptError btck_get_last_script_error(void);
+
+///@}
+
 #ifdef __cplusplus
 } // extern "C"
 #endif // __cplusplus

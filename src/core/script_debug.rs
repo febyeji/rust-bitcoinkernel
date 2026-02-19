@@ -20,7 +20,8 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use libbitcoinkernel_sys::{
-    btck_register_script_debug_callback, btck_unregister_script_debug_callback,
+    btck_get_last_script_error, btck_register_script_debug_callback,
+    btck_unregister_script_debug_callback,
 };
 
 use crate::core::verify::PrecomputedTransactionData;
@@ -646,6 +647,225 @@ impl fmt::Display for StackItem {
     }
 }
 
+// ─── ScriptExecError ─────────────────────────────────────────────────────────
+
+/// Detailed script execution error, mirroring Bitcoin Core's `ScriptError` enum.
+///
+/// Populated in [`ScriptTrace::script_error`] when verification fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptExecError {
+    /// No error (verification passed).
+    Ok,
+    UnknownError,
+    /// The top-of-stack value was false after script execution.
+    EvalFalse,
+    /// OP_RETURN was executed.
+    OpReturn,
+    // Size limits
+    ScriptSize,
+    PushSize,
+    OpCount,
+    StackSize,
+    SigCount,
+    PubkeyCount,
+    // Failed verify operations
+    Verify,
+    EqualVerify,
+    CheckMultiSigVerify,
+    CheckSigVerify,
+    NumEqualVerify,
+    // Logical/format/canonical errors
+    BadOpcode,
+    DisabledOpcode,
+    InvalidStackOperation,
+    InvalidAltstackOperation,
+    UnbalancedConditional,
+    // CHECKLOCKTIMEVERIFY / CHECKSEQUENCEVERIFY
+    NegativeLocktime,
+    UnsatisfiedLocktime,
+    // Malleability
+    SigHashType,
+    SigDer,
+    MinimalData,
+    SigPushOnly,
+    SigHighS,
+    SigNullDummy,
+    PubkeyType,
+    CleanStack,
+    MinimalIf,
+    SigNullFail,
+    // Softfork safeness
+    DiscourageUpgradableNops,
+    DiscourageUpgradableWitnessProgram,
+    DiscourageUpgradableTaprootVersion,
+    DiscourageOpSuccess,
+    DiscourageUpgradablePubkeyType,
+    // Segwit
+    WitnessProgramWrongLength,
+    WitnessProgramWitnessEmpty,
+    WitnessProgramMismatch,
+    WitnessMalleated,
+    WitnessMalleatedP2SH,
+    WitnessUnexpected,
+    WitnessPubkeyType,
+    // Taproot
+    SchnorrSigSize,
+    SchnorrSigHashType,
+    SchnorrSig,
+    TaprootWrongControlSize,
+    TapscriptValidationWeight,
+    TapscriptCheckMultiSig,
+    TapscriptMinimalIf,
+    TapscriptEmptyPubkey,
+    // Misc
+    OpCodeSeparator,
+    SigFindAndDelete,
+    /// An error code not recognised by this version of the library.
+    Other(u32),
+}
+
+impl ScriptExecError {
+    fn from_raw(v: u32) -> Self {
+        // Values mirror Bitcoin Core's ScriptError enum in script/script_error.h.
+        // The numeric values are stable — they are part of the ABI defined in
+        // bitcoinkernel.h via BTCK_SCRIPT_ERR_* #define constants.
+        match v {
+            0 => ScriptExecError::Ok,
+            1 => ScriptExecError::UnknownError,
+            2 => ScriptExecError::EvalFalse,
+            3 => ScriptExecError::OpReturn,
+            4 => ScriptExecError::ScriptSize,
+            5 => ScriptExecError::PushSize,
+            6 => ScriptExecError::OpCount,
+            7 => ScriptExecError::StackSize,
+            8 => ScriptExecError::SigCount,
+            9 => ScriptExecError::PubkeyCount,
+            10 => ScriptExecError::Verify,
+            11 => ScriptExecError::EqualVerify,
+            12 => ScriptExecError::CheckMultiSigVerify,
+            13 => ScriptExecError::CheckSigVerify,
+            14 => ScriptExecError::NumEqualVerify,
+            15 => ScriptExecError::BadOpcode,
+            16 => ScriptExecError::DisabledOpcode,
+            17 => ScriptExecError::InvalidStackOperation,
+            18 => ScriptExecError::InvalidAltstackOperation,
+            19 => ScriptExecError::UnbalancedConditional,
+            20 => ScriptExecError::NegativeLocktime,
+            21 => ScriptExecError::UnsatisfiedLocktime,
+            22 => ScriptExecError::SigHashType,
+            23 => ScriptExecError::SigDer,
+            24 => ScriptExecError::MinimalData,
+            25 => ScriptExecError::SigPushOnly,
+            26 => ScriptExecError::SigHighS,
+            27 => ScriptExecError::SigNullDummy,
+            28 => ScriptExecError::PubkeyType,
+            29 => ScriptExecError::CleanStack,
+            30 => ScriptExecError::MinimalIf,
+            31 => ScriptExecError::SigNullFail,
+            32 => ScriptExecError::DiscourageUpgradableNops,
+            33 => ScriptExecError::DiscourageUpgradableWitnessProgram,
+            34 => ScriptExecError::DiscourageUpgradableTaprootVersion,
+            35 => ScriptExecError::DiscourageOpSuccess,
+            36 => ScriptExecError::DiscourageUpgradablePubkeyType,
+            37 => ScriptExecError::WitnessProgramWrongLength,
+            38 => ScriptExecError::WitnessProgramWitnessEmpty,
+            39 => ScriptExecError::WitnessProgramMismatch,
+            40 => ScriptExecError::WitnessMalleated,
+            41 => ScriptExecError::WitnessMalleatedP2SH,
+            42 => ScriptExecError::WitnessUnexpected,
+            43 => ScriptExecError::WitnessPubkeyType,
+            44 => ScriptExecError::SchnorrSigSize,
+            45 => ScriptExecError::SchnorrSigHashType,
+            46 => ScriptExecError::SchnorrSig,
+            47 => ScriptExecError::TaprootWrongControlSize,
+            48 => ScriptExecError::TapscriptValidationWeight,
+            49 => ScriptExecError::TapscriptCheckMultiSig,
+            50 => ScriptExecError::TapscriptMinimalIf,
+            51 => ScriptExecError::TapscriptEmptyPubkey,
+            52 => ScriptExecError::OpCodeSeparator,
+            53 => ScriptExecError::SigFindAndDelete,
+            other => ScriptExecError::Other(other),
+        }
+    }
+
+    /// Human-readable description of the error.
+    pub fn description(&self) -> &'static str {
+        match self {
+            ScriptExecError::Ok => "OK",
+            ScriptExecError::UnknownError => "unknown error",
+            ScriptExecError::EvalFalse => "script evaluated to false",
+            ScriptExecError::OpReturn => "OP_RETURN executed",
+            ScriptExecError::ScriptSize => "script too large",
+            ScriptExecError::PushSize => "push data too large",
+            ScriptExecError::OpCount => "too many opcodes",
+            ScriptExecError::StackSize => "stack too large",
+            ScriptExecError::SigCount => "too many signatures",
+            ScriptExecError::PubkeyCount => "too many public keys",
+            ScriptExecError::Verify => "OP_VERIFY failed",
+            ScriptExecError::EqualVerify => "OP_EQUALVERIFY failed",
+            ScriptExecError::CheckMultiSigVerify => "OP_CHECKMULTISIGVERIFY failed",
+            ScriptExecError::CheckSigVerify => "OP_CHECKSIGVERIFY failed",
+            ScriptExecError::NumEqualVerify => "OP_NUMEQUALVERIFY failed",
+            ScriptExecError::BadOpcode => "invalid opcode",
+            ScriptExecError::DisabledOpcode => "disabled opcode",
+            ScriptExecError::InvalidStackOperation => "invalid stack operation",
+            ScriptExecError::InvalidAltstackOperation => "invalid altstack operation",
+            ScriptExecError::UnbalancedConditional => "unbalanced conditional",
+            ScriptExecError::NegativeLocktime => "negative locktime",
+            ScriptExecError::UnsatisfiedLocktime => "locktime not satisfied",
+            ScriptExecError::SigHashType => "invalid signature hash type",
+            ScriptExecError::SigDer => "non-DER signature",
+            ScriptExecError::MinimalData => "non-minimal data encoding",
+            ScriptExecError::SigPushOnly => "signature in non-push scriptSig",
+            ScriptExecError::SigHighS => "non-low-S signature",
+            ScriptExecError::SigNullDummy => "extra items left on stack after multisig",
+            ScriptExecError::PubkeyType => "invalid public key type",
+            ScriptExecError::CleanStack => "extra items left on stack",
+            ScriptExecError::MinimalIf => "OP_IF argument not minimal",
+            ScriptExecError::SigNullFail => "non-null signature after failed CHECKSIG",
+            ScriptExecError::DiscourageUpgradableNops => "NOPx reserved for soft-fork upgrades",
+            ScriptExecError::DiscourageUpgradableWitnessProgram => {
+                "witness version reserved for soft-fork upgrades"
+            }
+            ScriptExecError::DiscourageUpgradableTaprootVersion => {
+                "taproot version reserved for soft-fork upgrades"
+            }
+            ScriptExecError::DiscourageOpSuccess => "OP_SUCCESSx reserved for soft-fork upgrades",
+            ScriptExecError::DiscourageUpgradablePubkeyType => {
+                "public key type reserved for soft-fork upgrades"
+            }
+            ScriptExecError::WitnessProgramWrongLength => "witness program wrong length",
+            ScriptExecError::WitnessProgramWitnessEmpty => "witness program with empty witness",
+            ScriptExecError::WitnessProgramMismatch => "witness program mismatch",
+            ScriptExecError::WitnessMalleated => "witness requires empty scriptSig",
+            ScriptExecError::WitnessMalleatedP2SH => {
+                "witness requires only-redeemscript scriptSig"
+            }
+            ScriptExecError::WitnessUnexpected => "witness provided for non-witness script",
+            ScriptExecError::WitnessPubkeyType => "non-compressed public key in segwit",
+            ScriptExecError::SchnorrSigSize => "invalid Schnorr signature size",
+            ScriptExecError::SchnorrSigHashType => "invalid Schnorr signature hash type",
+            ScriptExecError::SchnorrSig => "invalid Schnorr signature",
+            ScriptExecError::TaprootWrongControlSize => "invalid taproot control block size",
+            ScriptExecError::TapscriptValidationWeight => "tapscript validation weight exceeded",
+            ScriptExecError::TapscriptCheckMultiSig => {
+                "OP_CHECKMULTISIG(VERIFY) not available in tapscript"
+            }
+            ScriptExecError::TapscriptMinimalIf => "OP_IF/NOTIF argument must be minimal in tapscript",
+            ScriptExecError::TapscriptEmptyPubkey => "empty public key in tapscript",
+            ScriptExecError::OpCodeSeparator => "OP_CODESEPARATOR in non-segwit script",
+            ScriptExecError::SigFindAndDelete => "FindAndDelete is not available in segwit",
+            ScriptExecError::Other(_) => "unrecognised script error",
+        }
+    }
+}
+
+impl fmt::Display for ScriptExecError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.description())
+    }
+}
+
 // ─── ScriptPhase ────────────────────────────────────────────────────────────
 
 /// The execution phase of a Bitcoin script.
@@ -714,8 +934,14 @@ pub struct ScriptTrace {
     pub steps: Vec<ScriptStep>,
     /// Whether verification succeeded.
     pub success: bool,
-    /// Error description if verification failed.
+    /// High-level error description if verification failed.
     pub error: Option<String>,
+    /// Detailed script execution error code, if verification failed.
+    ///
+    /// This mirrors Bitcoin Core's internal `ScriptError` enum and tells you
+    /// exactly which check failed (e.g. [`ScriptExecError::EqualVerify`],
+    /// [`ScriptExecError::CheckSigVerify`], etc.).
+    pub script_error: Option<ScriptExecError>,
 }
 
 impl ScriptTrace {
@@ -830,7 +1056,11 @@ unsafe extern "C" fn script_debug_callback_trampoline(
 /// Phase is inferred by watching `script_bytes` change between steps:
 /// first script = ScriptSig, second = ScriptPubKey, third = RedeemScript,
 /// fourth = WitnessScript.
-fn build_trace(raw: Vec<RawStepData>, result: Result<(), KernelError>) -> ScriptTrace {
+fn build_trace(
+    raw: Vec<RawStepData>,
+    result: Result<(), KernelError>,
+    exec_error: ScriptExecError,
+) -> ScriptTrace {
     let mut steps = Vec::with_capacity(raw.len());
     let mut phase_order: Vec<Vec<u8>> = Vec::new();
 
@@ -879,15 +1109,23 @@ fn build_trace(raw: Vec<RawStepData>, result: Result<(), KernelError>) -> Script
         });
     }
 
-    let (success, error) = match result {
-        Ok(()) => (true, None),
-        Err(e) => (false, Some(e.to_string())),
+    let (success, error, script_error) = match result {
+        Ok(()) => (true, None, None),
+        Err(e) => {
+            let se = if exec_error == ScriptExecError::Ok {
+                None
+            } else {
+                Some(exec_error)
+            };
+            (false, Some(e.to_string()), se)
+        }
     };
 
     ScriptTrace {
         steps,
         success,
         error,
+        script_error,
     }
 }
 
@@ -998,7 +1236,8 @@ pub fn trace_verify(
         precomputed_txdata,
     );
     let raw = debugger.into_raw_steps();
-    build_trace(raw, result)
+    let exec_error = ScriptExecError::from_raw(unsafe { btck_get_last_script_error() });
+    build_trace(raw, result, exec_error)
 }
 
 #[cfg(test)]
@@ -1121,7 +1360,7 @@ mod tests {
             },
         ];
 
-        let trace = build_trace(raw, Ok(()));
+        let trace = build_trace(raw, Ok(()), ScriptExecError::Ok);
         assert_eq!(trace.steps[0].phase, ScriptPhase::ScriptSig);
         assert_eq!(trace.steps[1].phase, ScriptPhase::ScriptPubKey);
         assert!(trace.success);
