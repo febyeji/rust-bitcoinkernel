@@ -13,6 +13,8 @@ name = "script_debugger"
 path = "src/script_debugger.rs"
 
 [dependencies]
+colored = "2"
+clap = { version = "4", features = ["derive"] }
 silentpayments = "0.1"
 bitcoin = "0.31"
 secp256k1 = "0.28"
