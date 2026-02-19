@@ -6,7 +6,8 @@ mod tests {
         prelude::*, verify, Block, BlockHash, BlockHeader, BlockSpentOutputs, BlockTreeEntry,
         BlockValidationStateRef, ChainParams, ChainType, ChainstateManager,
         ChainstateManagerBuilder, Coin, Context, ContextBuilder, KernelError, Log, Logger,
-        PrecomputedTransactionData, ScriptDebugger, ScriptExecError, ScriptPhase, ScriptPubkey, ScriptVerifyError,
+        Opcode, PrecomputedTransactionData, ScriptDebugger, ScriptExecError, ScriptPhase,
+        ScriptPubkey, ScriptVerifyError,
         Transaction, TransactionSpentOutputs, TxIn, TxOut, ValidationMode, VERIFY_ALL,
         VERIFY_ALL_PRE_TAPROOT, VERIFY_TAPROOT, VERIFY_WITNESS,
     };
@@ -853,5 +854,169 @@ mod tests {
             .or_else(|| err.downcast_ref::<&str>().copied())
             .unwrap_or("");
         assert!(msg.contains("ScriptDebugger is already active"), "Unexpected panic message: {}", msg);
+    }
+
+    /// Minimal legacy transaction with a 1-byte scriptSig.
+    /// null prevout (32-byte zero txid, index 0xffffffff), 1 output of 0 sat.
+    ///
+    /// Layout: version(4) | 1 input | txid(32) | vout(4) | scriptSig_len(1) | scriptSig(1) |
+    ///         sequence(4) | 1 output | value(8) | scriptPubKey_len(1) | scriptPubKey(1) | locktime(4)
+    fn minimal_tx_hex(scriptsig_byte: u8) -> String {
+        // Null prevout coinbase-like input, useful for testing EvalScript in isolation.
+        format!(
+            "01000000\
+             01\
+             0000000000000000000000000000000000000000000000000000000000000000\
+             00000000\
+             01{:02x}\
+             ffffffff\
+             01\
+             0000000000000000\
+             01\
+             51\
+             00000000",
+            scriptsig_byte
+        )
+    }
+
+    /// Helper: collect only the ScriptPubKey-phase steps that carry an instruction.
+    fn spk_ops(trace: &bitcoinkernel::ScriptTrace) -> Vec<&bitcoinkernel::ScriptStep> {
+        trace
+            .iter()
+            .filter(|s| s.phase == ScriptPhase::ScriptPubKey && s.instruction.is_some())
+            .collect()
+    }
+
+    // ── OP_IF / f_exec tests ────────────────────────────────────────────────
+
+    /// scriptSig = OP_1 (truthy) → OP_IF OP_2 OP_ELSE OP_3 OP_ENDIF
+    ///
+    /// IF branch is taken, so OP_2 executes (f_exec=true) and OP_3 is skipped
+    /// (f_exec=false).  OP_ELSE fires while still in the executing IF branch
+    /// (f_exec=true); OP_ENDIF fires while in the false ELSE branch (f_exec=false,
+    /// because DEBUG_SCRIPT fires at the top of the loop, before the pop).
+    #[test]
+    fn test_f_exec_if_branch_taken() {
+        let _ = testing_setup();
+        let _lock = DEBUGGER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // OP_IF=0x63  OP_2=0x52  OP_ELSE=0x67  OP_3=0x53  OP_ENDIF=0x68
+        let spk_hex = "6352675368";
+        let script_pubkey =
+            ScriptPubkey::try_from(hex::decode(spk_hex).unwrap().as_slice()).unwrap();
+        let tx = Transaction::new(
+            hex::decode(minimal_tx_hex(0x51)).unwrap().as_slice(), // 0x51 = OP_1
+        )
+        .unwrap();
+        let tx_data = PrecomputedTransactionData::new(&tx, &Vec::<TxOut>::new()).unwrap();
+
+        let trace = trace_verify(
+            &script_pubkey,
+            Some(0),
+            &tx,
+            0,
+            Some(VERIFY_ALL_PRE_TAPROOT),
+            &tx_data,
+        );
+
+        assert!(trace.success, "OP_IF with true condition should succeed");
+
+        let ops = spk_ops(&trace);
+        assert_eq!(
+            ops.len(),
+            5,
+            "Expected 5 ops: OP_IF OP_2 OP_ELSE OP_3 OP_ENDIF"
+        );
+
+        // OP_IF: outer context is executing
+        assert_eq!(ops[0].instruction.as_ref().unwrap().opcode, Opcode::OpIf);
+        assert!(ops[0].f_exec, "OP_IF should fire in executing context");
+
+        // OP_2: inside the true IF branch → executes
+        assert_eq!(ops[1].instruction.as_ref().unwrap().opcode, Opcode::OpNum(2));
+        assert!(ops[1].f_exec, "OP_2 in true IF branch should execute");
+
+        // OP_ELSE: fires while still in the executing IF branch (before the toggle)
+        assert_eq!(ops[2].instruction.as_ref().unwrap().opcode, Opcode::OpElse);
+        assert!(ops[2].f_exec, "OP_ELSE fires while IF branch is executing");
+
+        // OP_3: inside the false ELSE branch → skipped
+        assert_eq!(ops[3].instruction.as_ref().unwrap().opcode, Opcode::OpNum(3));
+        assert!(!ops[3].f_exec, "OP_3 in false ELSE branch should be skipped");
+
+        // OP_ENDIF: fires while still in the false ELSE context (before the pop)
+        assert_eq!(ops[4].instruction.as_ref().unwrap().opcode, Opcode::OpEndIf);
+        assert!(
+            !ops[4].f_exec,
+            "OP_ENDIF fires before the false ELSE branch is popped"
+        );
+    }
+
+    /// scriptSig = OP_0 (falsy) → OP_IF OP_2 OP_ELSE OP_1 OP_ENDIF
+    ///
+    /// ELSE branch is taken, so OP_2 is skipped (f_exec=false) and OP_1
+    /// executes (f_exec=true).  OP_ELSE fires while still in the false IF branch
+    /// (f_exec=false); OP_ENDIF fires while in the true ELSE branch (f_exec=true).
+    #[test]
+    fn test_f_exec_else_branch_taken() {
+        let _ = testing_setup();
+        let _lock = DEBUGGER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // OP_IF=0x63  OP_2=0x52  OP_ELSE=0x67  OP_1=0x51  OP_ENDIF=0x68
+        let spk_hex = "6352675168";
+        let script_pubkey =
+            ScriptPubkey::try_from(hex::decode(spk_hex).unwrap().as_slice()).unwrap();
+        let tx = Transaction::new(
+            hex::decode(minimal_tx_hex(0x00)).unwrap().as_slice(), // 0x00 = OP_0 → falsy
+        )
+        .unwrap();
+        let tx_data = PrecomputedTransactionData::new(&tx, &Vec::<TxOut>::new()).unwrap();
+
+        let trace = trace_verify(
+            &script_pubkey,
+            Some(0),
+            &tx,
+            0,
+            Some(VERIFY_ALL_PRE_TAPROOT),
+            &tx_data,
+        );
+
+        assert!(
+            trace.success,
+            "OP_IF with false condition (ELSE branch) should succeed"
+        );
+
+        let ops = spk_ops(&trace);
+        assert_eq!(
+            ops.len(),
+            5,
+            "Expected 5 ops: OP_IF OP_2 OP_ELSE OP_1 OP_ENDIF"
+        );
+
+        // OP_IF: outer context is executing
+        assert_eq!(ops[0].instruction.as_ref().unwrap().opcode, Opcode::OpIf);
+        assert!(ops[0].f_exec, "OP_IF should fire in executing context");
+
+        // OP_2: inside the false IF branch → skipped
+        assert_eq!(ops[1].instruction.as_ref().unwrap().opcode, Opcode::OpNum(2));
+        assert!(!ops[1].f_exec, "OP_2 in false IF branch should be skipped");
+
+        // OP_ELSE: fires while still in the false IF branch (before the toggle)
+        assert_eq!(ops[2].instruction.as_ref().unwrap().opcode, Opcode::OpElse);
+        assert!(
+            !ops[2].f_exec,
+            "OP_ELSE fires while IF branch is false (before toggle)"
+        );
+
+        // OP_1: inside the true ELSE branch → executes
+        assert_eq!(ops[3].instruction.as_ref().unwrap().opcode, Opcode::OpNum(1));
+        assert!(ops[3].f_exec, "OP_1 in true ELSE branch should execute");
+
+        // OP_ENDIF: fires while in the true ELSE branch (before the pop)
+        assert_eq!(ops[4].instruction.as_ref().unwrap().opcode, Opcode::OpEndIf);
+        assert!(
+            ops[4].f_exec,
+            "OP_ENDIF fires before the true ELSE branch is popped"
+        );
     }
 }
