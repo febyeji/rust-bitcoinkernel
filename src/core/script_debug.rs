@@ -33,6 +33,7 @@ use crate::{verify, KernelError, ScriptPubkeyExt, TransactionExt};
 
 /// A decoded Bitcoin script opcode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Opcode {
     // Push values
     Op0,
@@ -373,10 +374,12 @@ impl fmt::Display for Opcode {
 
 /// A decoded instruction from a Bitcoin script.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ScriptInstruction {
     /// The opcode for this instruction.
     pub opcode: Opcode,
     /// The push data bytes (if this is a push instruction).
+    #[cfg_attr(feature = "serde", serde(with = "serde_opt_hex"))]
     pub push_data: Option<Vec<u8>>,
     /// Byte offset of this instruction within the script.
     pub byte_offset: usize,
@@ -512,6 +515,7 @@ pub fn decode_script(script: &[u8]) -> Vec<ScriptInstruction> {
 
 /// Display format for stack items.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum StackItemFormat {
     /// Hexadecimal (e.g., "0x3045022100...")
     Hex,
@@ -653,8 +657,9 @@ impl fmt::Display for StackItem {
 
 /// Detailed script execution error, mirroring Bitcoin Core's `ScriptError` enum.
 ///
-/// Populated in [`ScriptTrace::script_error`] when verification fails.
+///// Populated in [`ScriptTrace::script_error`] when verification fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ScriptExecError {
     /// No error (verification passed).
     Ok,
@@ -868,6 +873,8 @@ impl fmt::Display for ScriptExecError {
     }
 }
 
+impl std::error::Error for ScriptExecError {}
+
 // ─── ScriptPhase ────────────────────────────────────────────────────────────
 
 /// The execution phase of a Bitcoin script.
@@ -875,6 +882,7 @@ impl fmt::Display for ScriptExecError {
 /// During verification, multiple scripts may be executed in sequence.
 /// The phase is inferred by detecting changes in `script_bytes` across steps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ScriptPhase {
     /// The scriptSig (unlocking script) from the transaction input.
     ScriptSig,
@@ -908,6 +916,7 @@ impl fmt::Display for ScriptPhase {
 /// executes (or the final state after the last opcode when `instruction` is
 /// `None`).
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ScriptStep {
     /// Global step index across all phases (0-based).
     pub step_index: usize,
@@ -918,6 +927,7 @@ pub struct ScriptStep {
     /// The alt stack at this point.
     pub altstack: Vec<StackItem>,
     /// Raw script bytes for this phase.
+    #[cfg_attr(feature = "serde", serde(with = "serde_hex"))]
     pub script_bytes: Vec<u8>,
     /// The inferred execution phase.
     pub phase: ScriptPhase,
@@ -933,6 +943,7 @@ pub struct ScriptStep {
 ///
 /// Returned by [`trace_verify`].
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ScriptTrace {
     /// All execution steps in order.
     pub steps: Vec<ScriptStep>,
@@ -988,6 +999,85 @@ impl ScriptTrace {
     /// Return the final stack (from the last step), if any.
     pub fn final_stack(&self) -> Option<&Vec<StackItem>> {
         self.steps.last().map(|s| &s.stack)
+    }
+}
+
+// ─── Serde support ───────────────────────────────────────────────────────────
+
+/// Serialize/deserialize `Vec<u8>` as a lowercase hex string.
+#[cfg(feature = "serde")]
+mod serde_hex {
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        use serde::Deserialize;
+        let hex = String::deserialize(d)?;
+        if hex.len() % 2 != 0 {
+            return Err(serde::de::Error::custom("odd-length hex string"));
+        }
+        (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(serde::de::Error::custom))
+            .collect()
+    }
+}
+
+/// Serialize/deserialize `Option<Vec<u8>>` as an optional lowercase hex string.
+#[cfg(feature = "serde")]
+mod serde_opt_hex {
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &Option<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
+        match bytes {
+            Some(b) => s.serialize_some(&b.iter().map(|x| format!("{:02x}", x)).collect::<String>()),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<u8>>, D::Error> {
+        let opt = <Option<String> as serde::Deserialize>::deserialize(d)?;
+        match opt {
+            None => Ok(None),
+            Some(hex) => {
+                if hex.len() % 2 != 0 {
+                    return Err(serde::de::Error::custom("odd-length hex string"));
+                }
+                (0..hex.len())
+                    .step_by(2)
+                    .map(|i| {
+                        u8::from_str_radix(&hex[i..i + 2], 16).map_err(serde::de::Error::custom)
+                    })
+                    .collect::<Result<Vec<u8>, _>>()
+                    .map(Some)
+            }
+        }
+    }
+}
+
+/// [`StackItem`] serializes as a lowercase hex string (e.g. `"3045..."`).
+#[cfg(feature = "serde")]
+impl serde::Serialize for StackItem {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.0.iter().map(|b| format!("{:02x}", b)).collect::<String>())
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for StackItem {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let hex = <String as serde::Deserialize>::deserialize(d)?;
+        if hex.len() % 2 != 0 {
+            return Err(serde::de::Error::custom("odd-length hex string"));
+        }
+        let bytes = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(serde::de::Error::custom))
+            .collect::<Result<Vec<u8>, _>>()?;
+        Ok(StackItem(bytes))
     }
 }
 
