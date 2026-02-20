@@ -16,7 +16,9 @@
 //! a second one while the first is alive will panic.  The debugger is
 //! automatically unregistered when it is dropped.
 
+use std::collections::HashMap;
 use std::fmt;
+use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use libbitcoinkernel_sys::{
@@ -403,7 +405,7 @@ pub fn decode_script(script: &[u8]) -> Vec<ScriptInstruction> {
                 byte_offset: start,
                 byte_length: 1,
             });
-        } else if byte >= 1 && byte <= 75 {
+        } else if (1..=75).contains(&byte) {
             // Direct push: next `byte` bytes
             let n = byte as usize;
             let data = if pos + n <= script.len() {
@@ -595,7 +597,7 @@ impl StackItem {
     }
 
     fn format_ascii(&self) -> String {
-        if self.0.iter().all(|&b| b >= 0x20 && b <= 0x7e) && !self.0.is_empty() {
+        if self.0.iter().all(|&b| (0x20..=0x7e).contains(&b)) && !self.0.is_empty() {
             String::from_utf8_lossy(&self.0).to_string()
         } else {
             self.format_hex()
@@ -978,6 +980,11 @@ impl ScriptTrace {
         seen
     }
 
+    /// Return all steps belonging to the given phase, in order.
+    pub fn steps_for_phase(&self, phase: ScriptPhase) -> Vec<&ScriptStep> {
+        self.steps.iter().filter(|s| s.phase == phase).collect()
+    }
+
     /// Return the final stack (from the last step), if any.
     pub fn final_stack(&self) -> Option<&Vec<StackItem>> {
         self.steps.last().map(|s| &s.stack)
@@ -1055,58 +1062,52 @@ unsafe extern "C" fn script_debug_callback_trampoline(
     });
 }
 
+/// Map a first-seen phase index (0, 1, 2, …) to the corresponding [`ScriptPhase`].
+fn phase_from_index(idx: usize) -> ScriptPhase {
+    match idx {
+        0 => ScriptPhase::ScriptSig,
+        1 => ScriptPhase::ScriptPubKey,
+        2 => ScriptPhase::RedeemScript,
+        3 => ScriptPhase::WitnessScript,
+        _ => ScriptPhase::Unknown,
+    }
+}
+
 /// Convert raw callback data into a [`ScriptTrace`] with phase detection.
 ///
 /// Phase is inferred by watching `script_bytes` change between steps:
 /// first script = ScriptSig, second = ScriptPubKey, third = RedeemScript,
 /// fourth = WitnessScript.
+///
+/// Decoded instructions and phases are cached by script bytes so each
+/// distinct script is decoded exactly once.
 fn build_trace(
     raw: Vec<RawStepData>,
     result: Result<(), KernelError>,
     exec_error: ScriptExecError,
 ) -> ScriptTrace {
     let mut steps = Vec::with_capacity(raw.len());
-    let mut phase_order: Vec<Vec<u8>> = Vec::new();
+    // Cache: script_bytes → (phase, decoded instructions), keyed in first-seen order.
+    let mut script_cache: HashMap<Vec<u8>, (ScriptPhase, Vec<ScriptInstruction>)> =
+        HashMap::new();
+    let mut next_phase_idx: usize = 0;
 
     for (global_idx, raw_step) in raw.into_iter().enumerate() {
-        // Detect phase by unique script_bytes sequence
-        let phase_idx = if let Some(existing) = phase_order
-            .iter()
-            .position(|s| *s == raw_step.script_bytes)
-        {
-            existing
-        } else {
-            phase_order.push(raw_step.script_bytes.clone());
-            phase_order.len() - 1
-        };
-
-        let phase = match phase_idx {
-            0 => ScriptPhase::ScriptSig,
-            1 => ScriptPhase::ScriptPubKey,
-            2 => ScriptPhase::RedeemScript,
-            3 => ScriptPhase::WitnessScript,
-            _ => ScriptPhase::Unknown,
-        };
-
-        let instructions = decode_script(&raw_step.script_bytes);
-        let instruction = instructions.get(raw_step.opcode_pos as usize).cloned();
-
-        let stack = raw_step
-            .stack
-            .into_iter()
-            .map(StackItem)
-            .collect();
-        let altstack = raw_step
-            .altstack
-            .into_iter()
-            .map(StackItem)
-            .collect();
+        let cached = script_cache
+            .entry(raw_step.script_bytes.clone())
+            .or_insert_with(|| {
+                let p = phase_from_index(next_phase_idx);
+                next_phase_idx += 1;
+                (p, decode_script(&raw_step.script_bytes))
+            });
+        let instruction = cached.1.get(raw_step.opcode_pos as usize).cloned();
+        let phase = cached.0;
 
         steps.push(ScriptStep {
             step_index: global_idx,
             instruction,
-            stack,
-            altstack,
+            stack: raw_step.stack.into_iter().map(StackItem).collect(),
+            altstack: raw_step.altstack.into_iter().map(StackItem).collect(),
             script_bytes: raw_step.script_bytes,
             phase,
             opcode_pos: raw_step.opcode_pos,
@@ -1147,6 +1148,12 @@ pub struct ScriptDebugger {
     holder: *mut CallbackHolder,
 }
 
+impl Default for ScriptDebugger {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ScriptDebugger {
     /// Create a new debugger and register the global C callback.
     ///
@@ -1181,14 +1188,14 @@ impl ScriptDebugger {
     /// Consume the debugger and return the accumulated raw steps.
     ///
     /// The callback is unregistered before the steps are returned.
-    fn into_raw_steps(mut self) -> Vec<RawStepData> {
+    fn into_raw_steps(self) -> Vec<RawStepData> {
+        // Wrap in ManuallyDrop to suppress the normal Drop call; we perform
+        // the same cleanup here ourselves.
+        let this = ManuallyDrop::new(self);
         unsafe {
             btck_unregister_script_debug_callback();
-            let holder = Box::from_raw(self.holder);
-            self.holder = std::ptr::null_mut();
+            let holder = Box::from_raw(this.holder);
             DEBUGGER_ACTIVE.store(false, Ordering::SeqCst);
-            // Prevent Drop from running again
-            std::mem::forget(self);
             holder.raw_steps
         }
     }
