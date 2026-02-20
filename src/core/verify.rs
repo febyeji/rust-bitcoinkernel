@@ -233,7 +233,7 @@ pub const VERIFY_ALL_PRE_TAPROOT: btck_ScriptVerificationFlags = VERIFY_P2SH
 ///
 /// * `Ok(...)` - The PrecomputedTransactionData
 /// * `Err(KernelError::MismatchedOutputsSize)` - Number of outputs does not match
-/// the number of the transaction's inputs.
+///   the number of the transaction's inputs.
 ///
 /// # Examples
 ///
@@ -426,9 +426,7 @@ pub fn verify(
         )
     };
 
-    let script_status = ScriptVerifyStatus::try_from(status).map_err(|_| {
-        KernelError::Internal(format!("Invalid script verify status: {:?}", status))
-    })?;
+    let script_status = ScriptVerifyStatus::from(status);
 
     if !c_helpers::verification_passed(ret) {
         let err = match script_status {

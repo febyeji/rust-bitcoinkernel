@@ -57,10 +57,7 @@ fuzz_target!(|data: VerifyInput| {
         &tx_data,
     );
 
-    match res {
-        Err(KernelError::ScriptVerify(ScriptVerifyError::InvalidFlagsCombination)) => {
-            assert_eq!(data.flags.unwrap() & VERIFY_WITNESS, VERIFY_WITNESS)
-        }
-        _ => {}
+    if let Err(KernelError::ScriptVerify(ScriptVerifyError::InvalidFlagsCombination)) = res {
+        assert_eq!(data.flags.unwrap() & VERIFY_WITNESS, VERIFY_WITNESS)
     }
 });

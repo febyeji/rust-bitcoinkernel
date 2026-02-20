@@ -200,6 +200,12 @@ pub struct BlockValidationState {
 unsafe impl Send for BlockValidationState {}
 unsafe impl Sync for BlockValidationState {}
 
+impl Default for BlockValidationState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BlockValidationState {
     pub fn new() -> BlockValidationState {
         BlockValidationState {

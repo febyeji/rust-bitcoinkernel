@@ -241,11 +241,11 @@ impl Context {
     pub fn interrupt(&self) -> Result<(), KernelError> {
         let result = unsafe { btck_context_interrupt(self.inner) };
         if c_helpers::success(result) {
-            return Ok(());
+            Ok(())
         } else {
-            return Err(KernelError::Internal(
+            Err(KernelError::Internal(
                 "Context interrupt failed.".to_string(),
-            ));
+            ))
         }
     }
 }

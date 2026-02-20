@@ -44,6 +44,9 @@ pub fn to_c_result(success: bool) -> i32 {
     }
 }
 
+/// # Safety
+///
+/// `c_str` must be either null or a valid pointer to at least `len` bytes.
 pub unsafe fn to_string(c_str: *const c_char, len: usize) -> String {
     if !c_str.is_null() {
         let slice = std::slice::from_raw_parts(c_str as *const u8, len);
