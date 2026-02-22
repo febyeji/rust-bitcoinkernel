@@ -725,7 +725,7 @@ pub enum ScriptExecError {
 }
 
 impl ScriptExecError {
-    fn from_raw(v: u32) -> Self {
+    pub(crate) fn from_raw(v: u32) -> Self {
         // Values mirror Bitcoin Core's ScriptError enum in script/script_error.h.
         // The numeric values are stable — they are part of the ABI defined in
         // bitcoinkernel.h via BTCK_SCRIPT_ERR_* #define constants.
@@ -921,6 +921,8 @@ pub struct ScriptStep {
     pub phase: ScriptPhase,
     /// The C-side opcode iteration counter.
     pub opcode_pos: u32,
+    /// Whether execution is active (`true`) or inside a non-taken `OP_IF` branch.
+    pub f_exec: bool,
 }
 
 // ─── ScriptTrace ─────────────────────────────────────────────────────────────
@@ -994,6 +996,7 @@ struct RawStepData {
     altstack: Vec<Vec<u8>>,
     script_bytes: Vec<u8>,
     opcode_pos: u32,
+    f_exec: bool,
 }
 
 /// Heap-allocated holder passed as `user_data` to the C callback.
@@ -1048,6 +1051,7 @@ unsafe extern "C" fn script_debug_callback_trampoline(
         altstack,
         script_bytes,
         opcode_pos: s.opcode_pos,
+        f_exec: s.f_exec != 0,
     });
 }
 
@@ -1106,6 +1110,7 @@ fn build_trace(
             script_bytes: raw_step.script_bytes,
             phase,
             opcode_pos: raw_step.opcode_pos,
+            f_exec: raw_step.f_exec,
         });
     }
 
@@ -1351,12 +1356,14 @@ mod tests {
                 altstack: vec![],
                 script_bytes: script_sig.clone(),
                 opcode_pos: 0,
+                f_exec: true,
             },
             RawStepData {
                 stack: vec![vec![]],
                 altstack: vec![],
                 script_bytes: script_pubkey.clone(),
                 opcode_pos: 0,
+                f_exec: true,
             },
         ];
 
