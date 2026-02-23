@@ -41,7 +41,9 @@ void ResetChainman(TestingSetup& setup)
     setup.m_make_chainman();
     setup.LoadVerifyActivateChainstate();
     for (int i = 0; i < 2 * COINBASE_MATURITY; i++) {
-        MineBlock(setup.m_node, {});
+        node::BlockAssembler::Options options;
+        options.include_dummy_extranonce = true;
+        MineBlock(setup.m_node, options);
     }
     setup.m_node.validation_signals->SyncWithValidationInterfaceQueue();
 }
@@ -70,8 +72,7 @@ FUZZ_TARGET(process_message, .init = initialize_process_message)
 
     auto& node{g_setup->m_node};
     auto& connman{static_cast<ConnmanTestMsg&>(*node.connman)};
-    connman.ResetAddrCache();
-    connman.ResetMaxOutboundCycle();
+    connman.Reset();
     auto& chainman{static_cast<TestChainstateManager&>(*node.chainman)};
     const auto block_index_size{WITH_LOCK(chainman.GetMutex(), return chainman.BlockIndex().size())};
     SetMockTime(1610000000); // any time to successfully reset ibd
@@ -121,7 +122,7 @@ FUZZ_TARGET(process_message, .init = initialize_process_message)
             more_work = connman.ProcessMessagesOnce(p2p_node);
         } catch (const std::ios_base::failure&) {
         }
-        node.peerman->SendMessages(&p2p_node);
+        node.peerman->SendMessages(p2p_node);
     }
     node.validation_signals->SyncWithValidationInterfaceQueue();
     node.connman->StopNodes();

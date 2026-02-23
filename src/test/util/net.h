@@ -49,6 +49,8 @@ struct ConnmanTestMsg : public CConnman {
 
     void ResetAddrCache();
     void ResetMaxOutboundCycle();
+    /// Reset the internal state.
+    void Reset();
 
     std::vector<CNode*> TestNodes()
     {
@@ -101,7 +103,7 @@ struct ConnmanTestMsg : public CConnman {
 
     bool ProcessMessagesOnce(CNode& node) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex)
     {
-        return m_msgproc->ProcessMessages(&node, flagInterruptMsgProc);
+        return m_msgproc->ProcessMessages(node, flagInterruptMsgProc);
     }
 
     void NodeReceiveMsgBytes(CNode& node, std::span<const uint8_t> msg_bytes, bool& complete) const;
