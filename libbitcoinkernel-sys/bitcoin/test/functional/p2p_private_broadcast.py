@@ -18,7 +18,6 @@ from test_framework.p2p import (
 from test_framework.messages import (
     CAddress,
     CInv,
-    COIN,
     MSG_WTX,
     malleate_tx_to_invalid_witness,
     msg_inv,
@@ -27,7 +26,7 @@ from test_framework.messages import (
 from test_framework.netutil import (
     format_addr_port
 )
-from test_framework.script_util import ValidWitnessMalleatedTx
+from test_framework.script_util import build_malleated_tx_package
 from test_framework.socks5 import (
     Socks5Configuration,
     Socks5Server,
@@ -37,6 +36,7 @@ from test_framework.test_framework import (
 )
 from test_framework.util import (
     assert_equal,
+    assert_greater_than_or_equal,
     assert_not_equal,
     assert_raises_rpc_error,
     p2p_port,
@@ -302,6 +302,16 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
             self.log.info(f"{label}: ok: outbound connection i={i} is private broadcast of txid={tx['txid']}")
             broadcasts_done += 1
 
+        # Verify the tx we just observed is tracked in getprivatebroadcastinfo.
+        pbinfo = self.nodes[0].getprivatebroadcastinfo()
+        pending = [t for t in pbinfo["transactions"] if t["txid"] == tx["txid"] and t["wtxid"] == tx["wtxid"]]
+        assert_equal(len(pending), 1)
+        assert_equal(pending[0]["hex"].lower(), tx["hex"].lower())
+        peers = pending[0]["peers"]
+        assert len(peers) >= NUM_PRIVATE_BROADCAST_PER_TX
+        assert all("address" in p and "sent" in p for p in peers)
+        assert_greater_than_or_equal(sum(1 for p in peers if "received" in p), NUM_PRIVATE_BROADCAST_PER_TX)
+
     def run_test(self):
         tx_originator = self.nodes[0]
         tx_receiver = self.nodes[1]
@@ -367,6 +377,30 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         self.log.info("Waiting for normal broadcast to another peer")
         self.destinations[1]["node"].wait_for_inv([inv])
 
+        self.log.info("Checking getprivatebroadcastinfo no longer reports the transaction after it is received back")
+        pbinfo = tx_originator.getprivatebroadcastinfo()
+        pending = [t for t in pbinfo["transactions"] if t["txid"] == txs[0]["txid"] and t["wtxid"] == txs[0]["wtxid"]]
+        assert_equal(len(pending), 0)
+
+        self.log.info("Checking abortprivatebroadcast removes a pending private-broadcast transaction")
+        tx_abort = wallet.create_self_transfer()
+        tx_originator.sendrawtransaction(hexstring=tx_abort["hex"], maxfeerate=0.1)
+        assert any(t["wtxid"] == tx_abort["wtxid"] for t in tx_originator.getprivatebroadcastinfo()["transactions"])
+        abort_res = tx_originator.abortprivatebroadcast(tx_abort["txid"])
+        assert_equal(len(abort_res["removed_transactions"]), 1)
+        assert_equal(abort_res["removed_transactions"][0]["txid"], tx_abort["txid"])
+        assert_equal(abort_res["removed_transactions"][0]["wtxid"], tx_abort["wtxid"])
+        assert_equal(abort_res["removed_transactions"][0]["hex"].lower(), tx_abort["hex"].lower())
+        assert all(t["wtxid"] != tx_abort["wtxid"] for t in tx_originator.getprivatebroadcastinfo()["transactions"])
+
+        self.log.info("Checking abortprivatebroadcast fails for non-existent transaction")
+        assert_raises_rpc_error(
+            -5,
+            "Transaction not in private broadcast queue",
+            tx_originator.abortprivatebroadcast,
+            "0" * 64,
+        )
+
         self.log.info("Sending a transaction that is already in the mempool")
         skip_destinations = len(self.destinations)
         tx_originator.sendrawtransaction(hexstring=txs[0]["hex"], maxfeerate=0)
@@ -399,16 +433,17 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         tx_originator.setmocktime(0) # Let the clock tick again (it will go backwards due to this).
 
         self.log.info("Sending a pair of transactions with the same txid but different valid wtxids via RPC")
-        txgen = ValidWitnessMalleatedTx()
-        funding = wallet.get_utxo()
-        fee_sat = 1000
-        siblings_parent = txgen.build_parent_tx(funding["txid"], amount=funding["value"] * COIN - fee_sat)
-        sibling1, sibling2 = txgen.build_malleated_children(siblings_parent.txid_hex, amount=siblings_parent.vout[0].nValue - fee_sat)
+        parent = wallet.create_self_transfer()["tx"]
+        parent_amount = parent.vout[0].nValue - 10000
+        child_amount = parent_amount - 10000
+        siblings_parent, sibling1, sibling2 = build_malleated_tx_package(
+            parent=parent,
+            rebalance_parent_output_amount=parent_amount,
+            child_amount=child_amount)
         self.log.info(f"  - sibling1: txid={sibling1.txid_hex}, wtxid={sibling1.wtxid_hex}")
         self.log.info(f"  - sibling2: txid={sibling2.txid_hex}, wtxid={sibling2.wtxid_hex}")
         assert_equal(sibling1.txid_hex, sibling2.txid_hex)
         assert_not_equal(sibling1.wtxid_hex, sibling2.wtxid_hex)
-        wallet.sign_tx(siblings_parent)
         assert_equal(len(tx_originator.getrawmempool()), 1)
         tx_returner.send_without_ping(msg_tx(siblings_parent))
         self.wait_until(lambda: len(tx_originator.getrawmempool()) > 1)

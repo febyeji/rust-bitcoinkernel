@@ -1043,21 +1043,21 @@ public:
     virtual bool HasAllDesirableServiceFlags(ServiceFlags services) const = 0;
 
     /**
-    * Process protocol messages received from a given node
-    *
-    * @param[in]   pnode           The node which we have received messages from.
-    * @param[in]   interrupt       Interrupt condition for processing threads
-    * @return                      True if there is more work to be done
-    */
-    virtual bool ProcessMessages(CNode* pnode, std::atomic<bool>& interrupt) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex) = 0;
+     * Process protocol messages received from a given node
+     *
+     * @param[in]   node            The node which we have received messages from.
+     * @param[in]   interrupt       Interrupt condition for processing threads
+     * @return                      True if there is more work to be done
+     */
+    virtual bool ProcessMessages(CNode& node, std::atomic<bool>& interrupt) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex) = 0;
 
     /**
-    * Send queued protocol messages to a given node.
-    *
-    * @param[in]   pnode           The node which we are sending messages to.
-    * @return                      True if there is more work to be done
-    */
-    virtual bool SendMessages(CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex) = 0;
+     * Send queued protocol messages to a given node.
+     *
+     * @param[in]   node            The node which we are sending messages to.
+     * @return                      True if there is more work to be done
+     */
+    virtual bool SendMessages(CNode& node) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex) = 0;
 
 
 protected:
@@ -1241,7 +1241,7 @@ public:
         /// Wait for the number of needed connections to become greater than 0.
         void NumToOpenWait() const;
 
-    private:
+    protected:
         /**
          * Check if private broadcast can be done to IPv4 or IPv6 peers and if so via which proxy.
          * If private broadcast connections should not be opened to IPv4 or IPv6, then this will
@@ -1251,6 +1251,8 @@ public:
 
         /// Number of `ConnectionType::PRIVATE_BROADCAST` connections to open.
         std::atomic_size_t m_num_to_open{0};
+
+        friend struct ConnmanTestMsg;
     } m_private_broadcast;
 
     bool CheckIncomingNonce(uint64_t nonce);
