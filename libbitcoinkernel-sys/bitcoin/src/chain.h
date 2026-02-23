@@ -77,8 +77,7 @@ enum BlockStatus : uint32_t {
     BLOCK_HAVE_MASK          =   BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO,
 
     BLOCK_FAILED_VALID       =   32, //!< stage after last reached validness failed
-    BLOCK_FAILED_CHILD       =   64, //!< descends from failed block
-    BLOCK_FAILED_MASK        =   BLOCK_FAILED_VALID | BLOCK_FAILED_CHILD,
+    BLOCK_FAILED_CHILD       =   64, //!< Unused flag that was previously set when descending from failed block
 
     BLOCK_OPT_WITNESS        =   128, //!< block data in blk*.dat was received with a witness-enforcing client
 
@@ -253,7 +252,7 @@ public:
     {
         AssertLockHeld(::cs_main);
         assert(!(nUpTo & ~BLOCK_VALID_MASK)); // Only validity flags allowed.
-        if (nStatus & BLOCK_FAILED_MASK)
+        if (nStatus & BLOCK_FAILED_VALID)
             return false;
         return ((nStatus & BLOCK_VALID_MASK) >= nUpTo);
     }
@@ -264,7 +263,7 @@ public:
     {
         AssertLockHeld(::cs_main);
         assert(!(nUpTo & ~BLOCK_VALID_MASK)); // Only validity flags allowed.
-        if (nStatus & BLOCK_FAILED_MASK) return false;
+        if (nStatus & BLOCK_FAILED_VALID) return false;
 
         if ((nStatus & BLOCK_VALID_MASK) < nUpTo) {
             nStatus = (nStatus & ~BLOCK_VALID_MASK) | nUpTo;
@@ -426,6 +425,15 @@ public:
     int Height() const
     {
         return int(vChain.size()) - 1;
+    }
+
+    /** Check whether this chain's tip exists, has enough work, and is recent. */
+    bool IsTipRecent(const arith_uint256& min_chain_work, std::chrono::seconds max_tip_age) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        const auto tip{Tip()};
+        return tip &&
+               tip->nChainWork >= min_chain_work &&
+               tip->Time() >= Now<NodeSeconds>() - max_tip_age;
     }
 
     /** Set/initialize a chain with a given tip. */

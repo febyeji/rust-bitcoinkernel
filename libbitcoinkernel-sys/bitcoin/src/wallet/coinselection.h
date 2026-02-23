@@ -319,11 +319,18 @@ enum class SelectionAlgorithm : uint8_t
 
 std::string GetAlgorithmName(SelectionAlgorithm algo);
 
+struct OutputPtrComparator {
+    bool operator()(const std::shared_ptr<COutput>& a, const std::shared_ptr<COutput>& b) const {
+        return *a < *b;
+    }
+};
+using OutputSet = std::set<std::shared_ptr<COutput>, OutputPtrComparator>;
+
 struct SelectionResult
 {
 private:
     /** Set of inputs selected by the algorithm to use in the transaction */
-    std::set<std::shared_ptr<COutput>> m_selected_inputs;
+    OutputSet m_selected_inputs;
     /** The target the algorithm selected for. Equal to the recipient amount plus non-input fees */
     CAmount m_target;
     /** The algorithm used to produce this result */
@@ -368,7 +375,7 @@ public:
     void Clear();
 
     void AddInput(const OutputGroup& group);
-    void AddInputs(const std::set<std::shared_ptr<COutput>>& inputs, bool subtract_fee_outputs);
+    void AddInputs(const OutputSet& inputs, bool subtract_fee_outputs);
 
     /** How much individual inputs overestimated the bump fees for shared ancestries */
     void SetBumpFeeDiscount(CAmount discount);
@@ -409,7 +416,7 @@ public:
     void Merge(const SelectionResult& other);
 
     /** Get m_selected_inputs */
-    const std::set<std::shared_ptr<COutput>>& GetInputSet() const;
+    const OutputSet& GetInputSet() const;
     /** Get the vector of COutputs that will be used to fill in a CTransaction's vin */
     std::vector<std::shared_ptr<COutput>> GetShuffledInputVector() const;
 
@@ -446,11 +453,16 @@ util::Result<SelectionResult> SelectCoinsBnB(std::vector<OutputGroup>& utxo_pool
 
 util::Result<SelectionResult> CoinGrinder(std::vector<OutputGroup>& utxo_pool, const CAmount& selection_target, CAmount change_target, int max_selection_weight);
 
-/** Select coins by Single Random Draw. OutputGroups are selected randomly from the eligible
- * outputs until the target is satisfied
+/** Select coins by Single Random Draw (SRD). SRD selects eligible OutputGroups from a shuffled
+ * ordering until the effective value of the input set suffices to create the recipient outputs and a
+ * change output with an amount of at least CHANGE_LOWER. While the maximum selection
+ * weight is exceeded during selection, the OutputGroup with the lowest effective value is dropped
+ * from the selection before additional OutputGroups are selected. Due to this greedy approach,
+ * SRD can fail to discover possible solutions in pathological cases.
  *
  * @param[in]  utxo_pool    The positive effective value OutputGroups eligible for selection
  * @param[in]  target_value The target value to select for
+ * @param[in]  change_fee The cost of adding the change output to the transaction at the transaction’s feerate.
  * @param[in]  rng The randomness source to shuffle coins
  * @param[in]  max_selection_weight The maximum allowed weight for a selection result to be valid
  * @returns If successful, a valid SelectionResult, otherwise, util::Error
