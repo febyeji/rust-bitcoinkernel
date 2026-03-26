@@ -1074,6 +1074,156 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "script_debug")]
+    #[test]
+    fn test_script_trace_from_script() {
+        use bitcoinkernel::ScriptTrace;
+
+        // OP_1 OP_2 OP_ADD OP_3 OP_EQUAL
+        let script = vec![0x51, 0x52, 0x93, 0x53, 0x87];
+        let trace = ScriptTrace::from_script(&script, &[]).expect("from_script should succeed");
+
+        assert!(trace.len() > 0, "trace should have frames");
+        assert!(trace.error().is_none(), "script should succeed");
+
+        for frame in trace.iter() {
+            assert_eq!(
+                frame.script, script,
+                "all frames should reference the user script"
+            );
+        }
+    }
+
+    #[cfg(feature = "script_debug")]
+    #[test]
+    fn test_script_trace_from_script_with_stack() {
+        use bitcoinkernel::ScriptTrace;
+
+        let script = vec![0x93, 0x53, 0x87]; // OP_ADD OP_3 OP_EQUAL
+        let initial_stack: Vec<Vec<u8>> = vec![vec![0x01], vec![0x02]];
+        let trace =
+            ScriptTrace::from_script(&script, &initial_stack).expect("from_script should succeed");
+
+        assert!(trace.len() > 0, "trace should have frames");
+        assert!(trace.error().is_none(), "script should succeed");
+
+        for frame in trace.iter() {
+            assert_eq!(
+                frame.script, script,
+                "all frames should reference the user script"
+            );
+        }
+    }
+
+    #[cfg(feature = "script_debug")]
+    #[test]
+    fn test_script_trace_from_script_failure() {
+        use bitcoinkernel::{ScriptError, ScriptTrace};
+
+        // OP_1 OP_2 OP_EQUAL -> false
+        let script = vec![0x51, 0x52, 0x87];
+        let trace = ScriptTrace::from_script(&script, &[])
+            .expect("from_script should succeed even when script fails");
+
+        assert!(trace.len() > 0, "trace should have frames even on failure");
+        assert!(trace.error().is_some(), "script should fail");
+        assert_eq!(*trace.error().unwrap(), ScriptError::EvalFalse);
+    }
+
+    #[cfg(feature = "script_debug")]
+    #[test]
+    fn test_script_trace_from_script_frame_filtering() {
+        use bitcoinkernel::ScriptTrace;
+
+        let script = vec![0x93, 0x53, 0x87]; // OP_ADD OP_3 OP_EQUAL
+        let initial_stack: Vec<Vec<u8>> = vec![vec![0x01], vec![0x02]];
+        let trace =
+            ScriptTrace::from_script(&script, &initial_stack).expect("from_script should succeed");
+
+        for frame in trace.iter() {
+            assert_eq!(
+                frame.script, script,
+                "filtered trace should contain no scriptSig frames"
+            );
+        }
+
+        assert!(
+            trace.len() >= 3,
+            "should have at least 3 frames for 3 opcodes"
+        );
+    }
+
+    #[cfg(feature = "script_debug")]
+    #[test]
+    fn test_script_trace_from_script_oversized_push() {
+        use bitcoinkernel::{KernelError, ScriptTrace};
+
+        let script = vec![0x51]; // OP_1
+        let oversized = vec![0u8; 521];
+        match ScriptTrace::from_script(&script, &[oversized]) {
+            Err(KernelError::InvalidLength { expected, actual }) => {
+                assert_eq!(expected, 520);
+                assert_eq!(actual, 521);
+            }
+            Err(other) => panic!("expected InvalidLength, got {other:?}"),
+            Ok(_) => panic!("push > 520 bytes should return Err"),
+        }
+    }
+
+    #[cfg(feature = "script_debug")]
+    #[test]
+    fn test_script_trace_from_script_push_size_boundaries() {
+        use bitcoinkernel::ScriptTrace;
+
+        // OP_DROP OP_1 — pop the pushed item, leave true on stack.
+        let script = vec![0x75, 0x51];
+
+        // Boundaries exercising every branch of encode_push_data:
+        //   0         → OP_0
+        //   1         → direct push (1 byte)
+        //   75, 76    → direct push / OP_PUSHDATA1 transition
+        //   255, 256  → OP_PUSHDATA1 / OP_PUSHDATA2 transition
+        //   520       → OP_PUSHDATA2 upper bound (MAX_SCRIPT_ELEMENT_SIZE)
+        for len in [0usize, 1, 75, 76, 255, 256, 520] {
+            let item = vec![0xaau8; len];
+            let trace = ScriptTrace::from_script(&script, &[item]).unwrap_or_else(|e| {
+                panic!("from_script with {len}-byte push should succeed: {e:?}")
+            });
+            assert!(
+                trace.error().is_none(),
+                "script should evaluate to true for {len}-byte push, got {:?}",
+                trace.error()
+            );
+        }
+    }
+
+    #[cfg(feature = "script_debug")]
+    #[test]
+    fn test_script_trace_from_script_sigscript_byte_collision() {
+        use bitcoinkernel::ScriptTrace;
+
+        // User script is `OP_1` (byte 0x51). For initial_stack = [vec![0x01]],
+        // the scriptSig also serializes to `OP_1`. A byte-equality filter would
+        // drop the user script's frames too; count-based filtering keeps them.
+        let script = vec![0x51];
+        let initial_stack: Vec<Vec<u8>> = vec![vec![0x01]];
+        let trace =
+            ScriptTrace::from_script(&script, &initial_stack).expect("from_script should succeed");
+
+        assert!(!trace.is_empty(), "scriptPubKey frames must be retained");
+        assert_eq!(
+            trace.get(0).unwrap().opcode,
+            0x51,
+            "first retained frame should be the user script's OP_1"
+        );
+        for frame in trace.iter() {
+            assert_eq!(
+                frame.script, script,
+                "scriptSig frames must not leak into the trace"
+            );
+        }
+    }
+
     #[test]
     fn test_traits() {
         fn is_sync<T: Sync>() {}

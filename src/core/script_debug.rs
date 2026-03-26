@@ -11,7 +11,7 @@ use libbitcoinkernel_sys::{
     btck_unregister_script_debug_callback,
 };
 
-use crate::core::verify::{ScriptError, ScriptVerifyError};
+use crate::core::verify::{ScriptError, ScriptVerifyError, VERIFY_NONE};
 use crate::core::{verify, PrecomputedTransactionData};
 use crate::KernelError;
 use crate::ScriptPubkeyExt;
@@ -197,6 +197,91 @@ unsafe fn read_stack(items: *const *const u8, sizes: *const usize, count: usize)
         .collect()
 }
 
+/// Encode a single data item as a Bitcoin Script push operation.
+///
+/// Maps items to canonical push opcodes:
+/// - `&[]` → `OP_0` (pushes empty vector)
+/// - `&[1]`..`&[16]` → `OP_1`..`OP_16`
+/// - other data ≤ 75 bytes → direct push
+/// - 76..255 bytes → `OP_PUSHDATA1`
+/// - 256..520 bytes → `OP_PUSHDATA2`
+///
+/// # Errors
+///
+/// Returns [`KernelError::InvalidLength`] if `data` exceeds 520 bytes
+/// (`MAX_SCRIPT_ELEMENT_SIZE`).
+fn encode_push_data(data: &[u8]) -> Result<Vec<u8>, KernelError> {
+    if data.len() > 520 {
+        return Err(KernelError::InvalidLength {
+            expected: 520,
+            actual: data.len(),
+        });
+    }
+    let mut out = Vec::new();
+    if data.is_empty() {
+        out.push(0x00); // OP_0
+    } else if data.len() == 1 && data[0] >= 1 && data[0] <= 16 {
+        out.push(0x50 + data[0]); // OP_1..OP_16
+    } else if data.len() <= 75 {
+        out.push(data.len() as u8);
+        out.extend_from_slice(data);
+    } else if data.len() <= 255 {
+        out.push(0x4c); // OP_PUSHDATA1
+        out.push(data.len() as u8);
+        out.extend_from_slice(data);
+    } else {
+        out.push(0x4d); // OP_PUSHDATA2
+        out.push((data.len() & 0xff) as u8);
+        out.push(((data.len() >> 8) & 0xff) as u8);
+        out.extend_from_slice(data);
+    }
+    Ok(out)
+}
+
+/// Build a minimal serialized Bitcoin transaction with the given scriptSig.
+fn build_dummy_tx(script_sig: &[u8]) -> Vec<u8> {
+    let mut tx = Vec::new();
+    // Version 2 (LE)
+    tx.extend_from_slice(&[0x02, 0x00, 0x00, 0x00]);
+    // 1 input
+    tx.push(0x01);
+    // prev_txid: 32 zero bytes
+    tx.extend_from_slice(&[0x00; 32]);
+    // prev_vout: 0 (LE)
+    tx.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+    // scriptSig length (varint) + scriptSig
+    encode_varint(script_sig.len(), &mut tx);
+    tx.extend_from_slice(script_sig);
+    // sequence: 0xffffffff
+    tx.extend_from_slice(&[0xff, 0xff, 0xff, 0xff]);
+    // 1 output
+    tx.push(0x01);
+    // value: 0 sats (LE)
+    tx.extend_from_slice(&[0x00; 8]);
+    // scriptPubKey: empty (length 0)
+    tx.push(0x00);
+    // locktime: 0
+    tx.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+    tx
+}
+
+/// Encode an integer as a Bitcoin varint.
+fn encode_varint(value: usize, out: &mut Vec<u8>) {
+    let v = value as u64;
+    if v < 0xfd {
+        out.push(v as u8);
+    } else if v <= 0xffff {
+        out.push(0xfd);
+        out.extend_from_slice(&(v as u16).to_le_bytes());
+    } else if v <= 0xffff_ffff {
+        out.push(0xfe);
+        out.extend_from_slice(&(v as u32).to_le_bytes());
+    } else {
+        out.push(0xff);
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+}
+
 /// A complete recording of script execution, captured by running verification
 /// and collecting every [`ScriptDebugFrame`] emitted by the interpreter.
 ///
@@ -263,6 +348,57 @@ impl ScriptTrace {
             frames: collected,
             script_error,
         })
+    }
+
+    /// Capture a trace by executing a bare script fragment.
+    ///
+    /// Encodes `initial_stack` items as scriptSig push opcodes, builds a
+    /// minimal dummy transaction, and runs verification with the given
+    /// `script` as the scriptPubKey. Frames from the scriptSig phase are
+    /// dropped so the returned trace contains only the user script's
+    /// execution frames.
+    ///
+    /// Each stack item maps to a push opcode: `vec![]` becomes `OP_0`
+    /// (pushes an empty vector), while `vec![0x00]` becomes a literal
+    /// 1-byte push of `0x00`. Both evaluate to false in boolean context
+    /// but are distinct stack items.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::InvalidLength`] if any item in `initial_stack`
+    /// exceeds 520 bytes (`MAX_SCRIPT_ELEMENT_SIZE`). Returns `Err` if a
+    /// debugger is already registered or if the dummy transaction cannot be
+    /// parsed.
+    pub fn from_script(script: &[u8], initial_stack: &[Vec<u8>]) -> Result<Self, KernelError> {
+        use crate::core::script::ScriptPubkey;
+        use crate::core::transaction::Transaction;
+
+        let mut script_sig = Vec::new();
+        for item in initial_stack {
+            script_sig.extend(encode_push_data(item)?);
+        }
+
+        let tx_bytes = build_dummy_tx(&script_sig);
+        let tx = Transaction::new(&tx_bytes)?;
+        let script_pubkey = ScriptPubkey::try_from(script)?;
+
+        let tx_data = crate::core::verify::PrecomputedTransactionData::new(
+            &tx,
+            &Vec::<crate::core::transaction::TxOut>::new(),
+        )?;
+
+        let mut trace =
+            Self::from_verify(&script_pubkey, Some(0), &tx, 0, Some(VERIFY_NONE), &tx_data)?;
+
+        // The encoded scriptSig contains one push opcode per initial stack
+        // item, followed by the interpreter's final callback frame. Drop that
+        // leading phase by count instead of by script bytes, because a user
+        // script can have the same byte representation as the scriptSig.
+        let script_sig_frame_count = initial_stack.len() + 1;
+        let frames_to_drop = script_sig_frame_count.min(trace.frames.len());
+        trace.frames.drain(..frames_to_drop);
+
+        Ok(trace)
     }
 
     /// Number of steps in the trace.
