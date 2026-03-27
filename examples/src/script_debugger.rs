@@ -3,13 +3,13 @@ use std::collections::HashSet;
 use bitcoin::Script;
 use bitcoinkernel::{
     prelude::*, PrecomputedTransactionData, ScriptDebugFrame, ScriptPubkey, ScriptTrace,
-    SigVersion, Transaction, TxOut, VERIFY_ALL, VERIFY_ALL_PRE_TAPROOT,
-    VERIFY_CHECKLOCKTIMEVERIFY, VERIFY_CHECKSEQUENCEVERIFY, VERIFY_DERSIG, VERIFY_NONE,
-    VERIFY_NULLDUMMY, VERIFY_P2SH, VERIFY_TAPROOT, VERIFY_WITNESS,
+    SigVersion, Transaction, TxOut, VERIFY_ALL, VERIFY_ALL_PRE_TAPROOT, VERIFY_CHECKLOCKTIMEVERIFY,
+    VERIFY_CHECKSEQUENCEVERIFY, VERIFY_DERSIG, VERIFY_NONE, VERIFY_NULLDUMMY, VERIFY_P2SH,
+    VERIFY_TAPROOT, VERIFY_WITNESS,
 };
 struct Session {
     script_pubkey: Option<Vec<u8>>,
-    spending_tx_hex: Option<String>,
+    spending_tx_bytes: Option<Vec<u8>>,
     amount: i64,
     input_index: usize,
     flags: u32,
@@ -24,7 +24,7 @@ impl Session {
     fn new() -> Self {
         Session {
             script_pubkey: None,
-            spending_tx_hex: None,
+            spending_tx_bytes: None,
             amount: 0,
             input_index: 0,
             flags: VERIFY_ALL,
@@ -51,7 +51,10 @@ impl Session {
                 match parts[1] {
                     "tx" => self.cmd_load_tx(parts[2]),
                     "script" => self.cmd_load_script(parts[2]),
-                    _ => println!("Unknown load target '{}'. Use: load tx <hex> | load script <hex>", parts[1]),
+                    _ => println!(
+                        "Unknown load target '{}'. Use: load tx <hex> | load script <hex>",
+                        parts[1]
+                    ),
                 }
             }
             "set" => {
@@ -64,7 +67,10 @@ impl Session {
                     "amount" => self.cmd_set_amount(parts[2]),
                     "flags" => self.cmd_set_flags(parts[2]),
                     "input" => self.cmd_set_input(parts[2]),
-                    _ => println!("Unknown set field '{}'. Use: scriptpubkey|spk|amount|flags|input", parts[1]),
+                    _ => println!(
+                        "Unknown set field '{}'. Use: scriptpubkey|spk|amount|flags|input",
+                        parts[1]
+                    ),
                 }
             }
             "stack" => {
@@ -84,7 +90,10 @@ impl Session {
                         self.initial_stack.clear();
                         println!("Initial stack cleared.");
                     }
-                    _ => println!("Unknown stack command '{}'. Use: stack push <hex> | stack clear", parts[1]),
+                    _ => println!(
+                        "Unknown stack command '{}'. Use: stack push <hex> | stack clear",
+                        parts[1]
+                    ),
                 }
             }
             "run" => self.cmd_run(),
@@ -120,7 +129,10 @@ impl Session {
                     "stack" => self.cmd_print_stack(),
                     "script" => self.cmd_print_script(),
                     "frame" => self.cmd_print_frame(),
-                    _ => println!("Unknown print target '{}'. Use: print stack|script|frame", parts[1]),
+                    _ => println!(
+                        "Unknown print target '{}'. Use: print stack|script|frame",
+                        parts[1]
+                    ),
                 }
             }
             "ps" => self.cmd_print_stack(),
@@ -132,7 +144,10 @@ impl Session {
                 println!("Session reset.");
             }
             "help" | "h" => Self::cmd_help(),
-            _ => println!("Unknown command '{}'. Type 'help' for available commands.", parts[0]),
+            _ => println!(
+                "Unknown command '{}'. Type 'help' for available commands.",
+                parts[0]
+            ),
         }
     }
 
@@ -153,12 +168,15 @@ impl Session {
         };
         let n_inputs = tx.inputs().count();
         let n_outputs = tx.outputs().count();
-        self.spending_tx_hex = Some(hex_str.to_string());
+        self.spending_tx_bytes = Some(bytes);
         self.bare_script = None;
         self.initial_stack.clear();
         self.trace = None;
         self.cursor = 0;
-        println!("Transaction loaded: {} input(s), {} output(s).", n_inputs, n_outputs);
+        println!(
+            "Transaction loaded: {} input(s), {} output(s).",
+            n_inputs, n_outputs
+        );
     }
 
     fn cmd_load_script(&mut self, hex_str: &str) {
@@ -172,7 +190,7 @@ impl Session {
         let len = bytes.len();
         self.bare_script = Some(bytes);
         self.script_pubkey = None;
-        self.spending_tx_hex = None;
+        self.spending_tx_bytes = None;
         self.trace = None;
         self.cursor = 0;
         println!("Bare script loaded: {} byte(s).", len);
@@ -260,7 +278,11 @@ impl Session {
             Ok(bytes) => {
                 let len = bytes.len();
                 self.initial_stack.push(bytes);
-                println!("Pushed {} byte(s) onto initial stack (depth now {}).", len, self.initial_stack.len());
+                println!(
+                    "Pushed {} byte(s) onto initial stack (depth now {}).",
+                    len,
+                    self.initial_stack.len()
+                );
             }
             Err(e) => println!("Invalid hex: {}", e),
         }
@@ -284,18 +306,16 @@ impl Session {
                 }
                 Err(e) => println!("Run failed: {}", e),
             }
-        } else if self.spending_tx_hex.is_some() && self.script_pubkey.is_some() {
-            let tx_hex = self.spending_tx_hex.as_ref().unwrap();
+        } else if self.spending_tx_bytes.is_some() && self.script_pubkey.is_some() {
+            let tx_bytes = self.spending_tx_bytes.as_ref().unwrap();
             let spk_bytes = self.script_pubkey.as_ref().unwrap();
 
-            let tx_bytes = match hex::decode(tx_hex) {
-                Ok(b) => b,
-                Err(e) => {
-                    println!("Failed to decode transaction hex: {}", e);
-                    return;
-                }
-            };
-            let tx = match Transaction::new(&tx_bytes) {
+            if self.flags & VERIFY_TAPROOT != 0 {
+                println!("Warning: taproot verification requires spent outputs, which are not yet supported.");
+                println!("Sighash computation may be incorrect for taproot inputs.");
+            }
+
+            let tx = match Transaction::new(tx_bytes) {
                 Ok(t) => t,
                 Err(e) => {
                     println!("Failed to parse transaction: {}", e);
@@ -393,7 +413,11 @@ impl Session {
         }
         match val.parse::<usize>() {
             Ok(n) => {
-                self.cursor = n.min(len - 1);
+                let target = n.min(len - 1);
+                if n != target {
+                    println!("Step {} is out of range, clamped to {}.", n, target);
+                }
+                self.cursor = target;
                 self.print_current_frame();
             }
             Err(_) => println!("Invalid step number: {}", val),
@@ -422,8 +446,16 @@ impl Session {
         }
         match next_bp {
             Some(bp) => {
-                self.cursor = bp.min(len - 1);
-                println!("Hit breakpoint at step {}.", self.cursor);
+                let target = bp.min(len - 1);
+                if bp != target {
+                    println!(
+                        "Breakpoint {} clamped to end of trace (step {}).",
+                        bp, target
+                    );
+                } else {
+                    println!("Hit breakpoint at step {}.", target);
+                }
+                self.cursor = target;
                 self.print_current_frame();
             }
             None => {
@@ -437,6 +469,15 @@ impl Session {
     fn cmd_break(&mut self, val: &str) {
         match val.parse::<usize>() {
             Ok(n) => {
+                if let Some(ref trace) = self.trace {
+                    if n >= trace.len() {
+                        println!(
+                            "Warning: breakpoint {} is beyond trace length ({}).",
+                            n,
+                            trace.len()
+                        );
+                    }
+                }
                 self.breakpoints.insert(n);
                 println!("Breakpoint set at step {}.", n);
             }
@@ -530,18 +571,19 @@ impl Session {
     fn cmd_info(&self) {
         let mode = if self.bare_script.is_some() {
             "bare script"
-        } else if self.spending_tx_hex.is_some() {
+        } else if self.spending_tx_bytes.is_some() {
             "transaction"
         } else {
             "none"
         };
         println!("Mode: {}", mode);
 
-        if let Some(ref hex) = self.spending_tx_hex {
-            let preview = if hex.len() > 40 {
-                format!("{}...", &hex[..40])
+        if let Some(ref bytes) = self.spending_tx_bytes {
+            let hex_str = hex::encode(bytes);
+            let preview = if hex_str.len() > 40 {
+                format!("{}...", &hex_str[..40])
             } else {
-                hex.clone()
+                hex_str
             };
             println!("Transaction: {}", preview);
         }
@@ -640,6 +682,12 @@ fn print_frame_display(frame: &ScriptDebugFrame, cursor: usize, total: usize) {
         frame.f_exec,
         sig_ver,
     );
+    if let Some(hash) = &frame.tapleaf_hash {
+        println!("  Tapleaf hash: 0x{}", hex::encode(hash));
+    }
+    if frame.codeseparator_pos != 0xFFFFFFFF {
+        println!("  OP_CODESEPARATOR pos: {}", frame.codeseparator_pos);
+    }
 
     if !frame.stack.is_empty() {
         println!("  Stack:");
@@ -740,13 +788,13 @@ fn flags_name(flags: u32) -> String {
     if flags == VERIFY_NONE {
         return "NONE".to_string();
     }
-    let mut names = Vec::new();
     if flags == VERIFY_ALL {
         return "ALL".to_string();
     }
     if flags == VERIFY_ALL_PRE_TAPROOT {
         return "ALL_PRE_TAPROOT".to_string();
     }
+    let mut names = Vec::new();
     if flags & VERIFY_P2SH != 0 {
         names.push("P2SH");
     }
@@ -796,8 +844,7 @@ fn main() {
                 session.handle_command(line);
             }
             Err(
-                rustyline::error::ReadlineError::Interrupted
-                | rustyline::error::ReadlineError::Eof,
+                rustyline::error::ReadlineError::Interrupted | rustyline::error::ReadlineError::Eof,
             ) => break,
             Err(e) => {
                 eprintln!("Error: {}", e);

@@ -1,0 +1,11 @@
+load script 5152935387
+run
+goto 4
+print stack
+back
+print stack
+back
+print stack
+goto 0
+print stack
+quit

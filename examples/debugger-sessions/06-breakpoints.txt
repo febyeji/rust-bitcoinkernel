@@ -1,0 +1,9 @@
+load script 5152935387
+run
+break 2
+break 4
+continue
+continue
+continue
+info
+quit

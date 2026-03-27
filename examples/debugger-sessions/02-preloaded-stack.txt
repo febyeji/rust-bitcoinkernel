@@ -1,0 +1,9 @@
+stack push 01
+stack push 02
+load script 935387
+run
+step
+step
+step
+info
+quit

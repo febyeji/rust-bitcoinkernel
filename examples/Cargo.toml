@@ -19,7 +19,7 @@ path = "src/script_debugger.rs"
 required-features = ["script_debug"]
 
 [features]
-script_debug = ["bitcoinkernel/script_debug"]
+script_debug = ["bitcoinkernel/script_debug", "rustyline"]
 
 [dependencies]
 silentpayments = "0.1"
@@ -28,5 +28,5 @@ secp256k1 = "0.28"
 env_logger = "0.11"
 log = "0.4"
 hex = "0.4"
-rustyline = "15"
+rustyline = { version = "15", optional = true }
 bitcoinkernel = { path = ".." }
