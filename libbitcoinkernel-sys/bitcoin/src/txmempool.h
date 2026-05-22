@@ -212,7 +212,9 @@ public:
 
     static const int ROLLING_FEE_HALFLIFE = 60 * 60 * 12; // public only for testing
 
-    struct CTxMemPoolEntry_Indices final : boost::multi_index::indexed_by<
+    using indexed_transaction_set = boost::multi_index_container<
+        CTxMemPoolEntry,
+        boost::multi_index::indexed_by<
             // sorted by txid
             boost::multi_index::hashed_unique<mempoolentry_txid, SaltedTxidHasher>,
             // sorted by wtxid
@@ -228,11 +230,7 @@ public:
                 CompareTxMemPoolEntryByEntryTime
             >
         >
-        {};
-    typedef boost::multi_index_container<
-        CTxMemPoolEntry,
-        CTxMemPoolEntry_Indices
-    > indexed_transaction_set;
+    >;
 
     /**
      * This mutex needs to be locked when accessing `mapTx` or other members
@@ -660,8 +658,8 @@ public:
         std::vector<CTransactionRef> GetAddedTxns() const {
             std::vector<CTransactionRef> ret;
             ret.reserve(m_entry_vec.size());
-            for (const auto& entry : m_entry_vec) {
-                ret.emplace_back(entry->GetSharedTx());
+            for (size_t i{0}; i < m_entry_vec.size(); ++i) {
+                ret.emplace_back(m_entry_vec[i]->GetSharedTx());
             }
             return ret;
         }
