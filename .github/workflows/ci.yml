@@ -108,18 +108,13 @@ jobs:
 
   windows-build:
     name: Build and Test on Windows
-    runs-on: windows-latest
+    runs-on: windows-2025-vs2026
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
 
     - name: Install Rust toolchain
-      uses: actions-rs/toolchain@v1
-      with:
-        profile: minimal
-        toolchain: stable
-        override: true
-        components: rustfmt
+      uses: dtolnay/rust-toolchain@stable
 
     - name: Cache dependencies
       uses: Swatinem/rust-cache@v2
